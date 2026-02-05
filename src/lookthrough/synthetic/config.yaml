@@ -1,0 +1,33 @@
+seed: 668
+
+v1:
+  portfolio:
+    portfolio_name: "Demo Institutional Portfolio"
+    base_currency: "USD"
+    owner_type: "Family Office"
+
+  counts:
+    funds: 8
+    companies: 500
+    quarters: 8
+
+  funds:
+    private_funds: 5
+    public_vehicles: 3
+
+  reporting:
+    # % of NAV represented by explicitly reported holdings
+    coverage_pct_min: 0.50
+    coverage_pct_max: 0.95
+
+    # fraction of holdings rows with reported_pct_nav populated
+    pct_nav_populated_rate: 0.20
+
+    # fraction of holdings rows with reported_value_usd populated
+    value_populated_rate: 0.90
+
+  noise:
+    alias_rate: 0.15
+    missing_sector_text_rate: 0.20
+    missing_country_text_rate: 0.10
+    conflicting_sector_rate: 0.04
