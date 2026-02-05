@@ -1,0 +1,311 @@
+erDiagram
+
+  %% ======================
+  %% BRONZE (Raw Documents)
+  %% ======================
+
+  bronze_document {
+    uuid document_id PK
+    string document_type
+    string source_system
+    uuid fund_id FK
+    uuid portfolio_id FK
+    date period_end
+    date received_date
+    string filename
+    string document_uri
+    string checksum_sha256
+    boolean is_scanned
+    int page_count
+    datetime created_at
+  }
+
+  bronze_document_section {
+    uuid section_id PK
+    uuid document_id FK
+    string section_type
+    int page_start
+    int page_end
+    string detected_by
+    float detection_confidence
+    string raw_text_uri
+    datetime created_at
+  }
+
+  fact_document_parse_event {
+    uuid parse_event_id PK
+    uuid document_id FK
+    datetime event_time
+    string severity
+    string event_type
+    string message
+    json payload_json
+    datetime created_at
+  }
+
+  %% ======================
+  %% SILVER (Conformed Dims)
+  %% ======================
+
+  dim_portfolio {
+    uuid portfolio_id PK
+    string portfolio_name
+    string base_currency
+    string owner_type
+    datetime created_at
+  }
+
+  dim_fund {
+    uuid fund_id PK
+    string fund_name
+    string manager_name
+    string strategy
+    int vintage_year
+    string domicile_country
+    datetime created_at
+  }
+
+  dim_company {
+    uuid company_id PK
+    string company_name
+    string primary_country
+    string website
+    datetime created_at
+  }
+
+  dim_entity_alias {
+    uuid alias_id PK
+    string entity_type
+    uuid entity_id
+    string alias_text
+    string source_system
+    float confidence
+  }
+
+  meta_taxonomy_version {
+    uuid taxonomy_version_id PK
+    string version_name
+    string source_uri
+    datetime created_at
+  }
+
+  dim_taxonomy_node {
+    uuid taxonomy_node_id PK
+    uuid taxonomy_version_id FK
+    string taxonomy_type
+    string node_name
+    uuid parent_node_id FK
+    string path
+    int level
+  }
+
+  meta_playbook_version {
+    uuid playbook_version_id PK
+    string version_name
+    string config_uri
+    datetime created_at
+    string notes
+  }
+
+  meta_run {
+    uuid run_id PK
+    string run_type
+    datetime started_at
+    datetime ended_at
+    string code_version_git_sha
+    uuid playbook_version_id FK
+    uuid taxonomy_version_id FK
+    json parameters_json
+    datetime created_at
+  }
+
+  %% ======================
+  %% FACTS (Reports + Holdings)
+  %% ======================
+
+  fact_fund_report {
+    uuid fund_report_id PK
+    uuid fund_id FK
+    date report_period_end
+    date received_date
+    string source_type
+    uuid document_id FK
+    float coverage_estimate
+    datetime created_at
+  }
+
+  fact_reported_holding {
+    uuid reported_holding_id PK
+    uuid fund_report_id FK
+    uuid document_id FK
+    uuid section_id FK
+    string raw_company_name
+    uuid company_id FK
+    decimal reported_value_usd
+    decimal reported_pct_nav
+    string reported_sector_text
+    string reported_country_text
+    string extraction_method
+    float extraction_confidence
+    int page_number
+    int row_number
+    string parser_version
+    json source_lineage
+    datetime created_at
+  }
+
+  %% ======================
+  %% CAPSTONE (Inference + Uncertainty)
+  %% ======================
+
+  fact_inferred_exposure {
+    uuid exposure_id PK
+    uuid run_id FK
+    uuid portfolio_id FK
+    uuid fund_id FK
+    uuid company_id FK
+    date as_of_date
+    decimal exposure_value_usd
+    decimal exposure_weight
+    string exposure_type
+    string method
+    uuid taxonomy_version_id FK
+    datetime created_at
+  }
+
+  fact_exposure_classification {
+    uuid exposure_id PK, FK
+    string taxonomy_type PK
+    uuid taxonomy_node_id FK
+    float classification_confidence
+    string classification_method
+    datetime created_at
+  }
+
+  fact_exposure_uncertainty {
+    uuid exposure_id PK, FK
+    string uncertainty_method PK
+    decimal p10_value_usd
+    decimal p50_value_usd
+    decimal p90_value_usd
+    decimal std_dev
+    datetime created_at
+  }
+
+  fact_aggregation_snapshot {
+    uuid run_id FK
+    uuid portfolio_id FK
+    date as_of_date
+    string taxonomy_type
+    uuid taxonomy_node_id FK
+    decimal total_exposure_value_usd
+    decimal total_exposure_p10
+    decimal total_exposure_p90
+    float coverage_pct
+    decimal confidence_weighted_exposure
+    datetime created_at
+  }
+
+  %% ======================
+  %% PRACTICAL (QA + Workflow + Audit)
+  %% ======================
+
+  fact_data_quality_assessment {
+    uuid dq_id PK
+    uuid run_id FK
+    uuid fund_report_id FK
+    string dimension
+    float score
+    json details_json
+    datetime created_at
+  }
+
+  fact_conflict_case {
+    uuid conflict_id PK
+    uuid run_id FK
+    string entity_type
+    uuid entity_id
+    string conflict_type
+    string severity
+    json evidence_json
+    string status
+    datetime created_at
+  }
+
+  fact_review_queue_item {
+    uuid queue_item_id PK
+    uuid run_id FK
+    uuid exposure_id FK
+    uuid reported_holding_id FK
+    string reason
+    int priority
+    string status
+    string assigned_to
+    datetime created_at
+  }
+
+  fact_human_decision {
+    uuid decision_id PK
+    uuid queue_item_id FK
+    string decision
+    json override_payload
+    string analyst
+    string comment
+    datetime created_at
+  }
+
+  fact_audit_event {
+    uuid audit_event_id PK
+    uuid run_id FK
+    datetime event_time
+    string actor_type
+    string actor_id
+    string action
+    string entity_type
+    uuid entity_id
+    json payload_json
+    string hash_prev
+    string hash_curr
+  }
+
+  %% ======================
+  %% RELATIONSHIPS
+  %% ======================
+
+  dim_portfolio ||--o{ bronze_document : has
+  dim_fund      ||--o{ bronze_document : has
+  bronze_document ||--o{ bronze_document_section : contains
+  bronze_document ||--o{ fact_document_parse_event : emits
+
+  dim_fund ||--o{ fact_fund_report : produces
+  bronze_document ||--o{ fact_fund_report : source_for
+
+  fact_fund_report ||--o{ fact_reported_holding : lists
+  bronze_document ||--o{ fact_reported_holding : extracted_from
+  bronze_document_section ||--o{ fact_reported_holding : within
+  dim_company ||--o{ fact_reported_holding : resolved_to
+
+  meta_playbook_version ||--o{ meta_run : configures
+  meta_taxonomy_version ||--o{ meta_run : configures
+
+  meta_run ||--o{ fact_inferred_exposure : generates
+  dim_portfolio ||--o{ fact_inferred_exposure : includes
+  dim_fund ||--o{ fact_inferred_exposure : via
+  dim_company ||--o{ fact_inferred_exposure : owns
+
+  meta_taxonomy_version ||--o{ dim_taxonomy_node : defines
+  dim_taxonomy_node ||--o{ dim_taxonomy_node : parent_of
+  dim_taxonomy_node ||--o{ fact_exposure_classification : labels
+
+  fact_inferred_exposure ||--o{ fact_exposure_classification : classified_as
+  fact_inferred_exposure ||--o{ fact_exposure_uncertainty : has
+  meta_run ||--o{ fact_aggregation_snapshot : rolls_up
+
+  meta_run ||--o{ fact_data_quality_assessment : assesses
+  meta_run ||--o{ fact_conflict_case : detects
+  meta_run ||--o{ fact_review_queue_item : queues
+  fact_inferred_exposure ||--o{ fact_review_queue_item : may_reference
+  fact_reported_holding ||--o{ fact_review_queue_item : may_reference
+
+  fact_review_queue_item ||--o{ fact_human_decision : decided_by
+  meta_run ||--o{ fact_audit_event : logs
