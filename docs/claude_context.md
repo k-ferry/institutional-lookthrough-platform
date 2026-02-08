@@ -1,86 +1,22 @@
-# Claude Session Context (Paste at Start of Every Claude CLI Session)
+Don't do anything yet, I'll give you a task next, this is for context: You are working inside my repo: institutional-lookthrough-platform.
 
-## Purpose
+First, read these files:
+- docs/v1_plan.md
+- data-engineering/schema.md
+- data-engineering/data_dictionary.md
 
-This document is the **canonical context block** for working with Claude via CLI.
-Paste this entire file as the **first message** of every new Claude CLI session.
+Goal: implement the V1 synthetic data generator (10 sectors → ~30 industries, 8 funds, 500 companies, 8 quarters) that outputs CSVs to data/silver/.
 
-Claude should assume **no prior memory** beyond what is written here.
+Constraints:
+- Do not change folder structure unless necessary.
+- Do not assume file contents beyond what you read.
+- Propose a small, safe set of changes, then implement.
+- Keep changes “one commit” sized at a time.
 
----
+## Current State (Updated)
 
-## Project Overview
-
-* **Course**: Spring Semester Software Project(s)
-* **Primary Language**: Python
-* **Environment**: Local development in VS Code
-* **Version Control**: Git (repo is source of truth)
-
-This project is being developed deliberately and incrementally.
-
----
-
-## Repository Structure
-
-* `/docs/`
-  Planning, design specs, decisions, and session artifacts
-
-* `/src/`
-  Application source code
-
-* `requirements.txt`
-  Python dependencies
-
-Claude does **not** have access to the filesystem unless files are explicitly pasted.
-
----
-
-## Current Phase
-
-* **Version**: v1
-* **Focus**: Synthetic data generator
-
-### Known Design Decisions
-
-* Hierarchical sector taxonomy
-* ~10 sectors
-* ~30 industries
-* Data includes reported values
-* Mostly current market or fair value
-* Some values expressed as % of NAV
-
----
-
-## Working Style & Expectations
-
-* Think step by step
-* Prefer simple, explicit designs over clever ones
-* Flag ambiguities or missing requirements
-* Ask clarifying questions before assuming
-* Do not hallucinate file contents or project state
-
-Claude should act as a **design and reasoning partner**, not a memory store.
-
----
-
-## Source of Truth Rules
-
-* Final decisions live in `/docs`
-* Code implements decisions, not the other way around
-* If a decision is not written down, it is not final
-
-Claude should recommend when something deserves to be written back to `/docs`.
-
----
-
-## Session Instructions
-
-After acknowledging this context:
-
-1. Ask what file, decision, or task to work on first
-2. Wait for explicit input before proceeding
-
----
-
-**Acknowledgment requested:**
-Please confirm you understand this context, then ask how you can help in this session.
+- Synthetic data generator complete (Silver layer)
+- Deterministic exposure inference implemented
+- Explicit unknown exposure bucket implemented
+- Gold aggregation snapshots available
+- AI classification scaffold in progress (Claude as first backend)
