@@ -204,6 +204,26 @@ def infer_exposures_v1(cfg: InferenceConfig) -> pd.DataFrame:
                     }
                 )
 
+            # Add unknown exposure bucket for uncovered portion of fund NAV
+            if coverage_est is not None and coverage_est < 1.0:
+                unknown_value_usd = fund_alloc_value * (1.0 - coverage_est)
+                unknown_weight = unknown_value_usd / cfg.portfolio_total_value_usd
+                exposures_out.append(
+                    {
+                        "exposure_id": str(uuid.uuid4()),
+                        "run_id": run_id,
+                        "portfolio_id": portfolio_id,
+                        "fund_id": fund_id,
+                        "company_id": None,
+                        "raw_company_name": "UNALLOCATED / UNKNOWN",
+                        "as_of_date": str(as_of_date),
+                        "exposure_value_usd": float(unknown_value_usd),
+                        "exposure_weight": float(unknown_weight),
+                        "exposure_type": "unknown",
+                        "method": method,
+                    }
+                )
+
     exposures_df = pd.DataFrame(exposures_out)
 
     # Write output
