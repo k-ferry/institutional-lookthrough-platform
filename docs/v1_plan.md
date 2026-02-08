@@ -44,12 +44,16 @@ Deliver a working vertical slice that:
 # Milestones (checklist)
 
 ## M1 — Data generator produces Bronze/Silver inputs
-- [ ] Create taxonomy (sector + geography)
-- [ ] Generate canonical companies (N=?)
-- [ ] Generate funds (private/public mix)
-- [ ] Generate quarterly fund reports
-- [ ] Generate holdings + imperfections (missingness, aliases, partial coverage)
-- [ ] Save outputs to `data/` (CSV or Parquet)
+- [x] Create taxonomy (sector + geography)
+- [x] Generate canonical companies
+- [x] Generate funds (private/public mix)
+- [x] Generate quarterly fund reports
+- [x] Generate holdings with missingness and aliases
+- [x] Deterministic exposure inference implemented
+- [x] Explicit unknown exposure bucket implemented
+Notes:
+- Unknown exposure bucket makes coverage explicit and enables proxy substitution and AI-assisted refinement in later stages.
+
 
 ## M2 — Basic pipeline produces Gold exposure rollups
 - [ ] Entity resolution (aliases → canonical)
