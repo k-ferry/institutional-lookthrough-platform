@@ -128,7 +128,7 @@ def generate_taxonomy(rng: np.random.Generator) -> tuple[pd.DataFrame, pd.DataFr
             nodes.append({
                 "taxonomy_node_id": make_uuid(f"industry_{industry_name}"),
                 "taxonomy_version_id": version_id,
-                "taxonomy_type": "sector",
+                "taxonomy_type": "industry",
                 "node_name": industry_name,
                 "parent_node_id": sector_node_id,
                 "path": f"/{sector_name}/{industry_name}",
@@ -237,8 +237,7 @@ def generate_companies(
 
     # Get all industries and countries from taxonomy
     industries = taxonomy_nodes[
-        (taxonomy_nodes["taxonomy_type"] == "sector") &
-        (taxonomy_nodes["level"] == 2)
+        taxonomy_nodes["taxonomy_type"] == "industry"
     ]["node_name"].tolist()
 
     countries = COUNTRIES
