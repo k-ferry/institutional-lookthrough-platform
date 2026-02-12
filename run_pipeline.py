@@ -19,6 +19,11 @@ STEPS = [
         'always': True,
     },
     {
+        'name': 'Entity Resolution',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.inference.entity_resolution'],
+        'always': True,
+    },
+    {
         'name': 'Exposure Inference',
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.exposure'],
         'always': True,
