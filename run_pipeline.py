@@ -38,6 +38,16 @@ STEPS = [
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.aggregate'],
         'always': True,
     },
+    {
+        'name': 'Review Queue',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.governance.review_queue'],
+        'always': True,
+    },
+    {
+        'name': 'Audit Trail',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.governance.audit'],
+        'always': True,
+    },
 ]
 
 
