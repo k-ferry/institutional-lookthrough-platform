@@ -151,6 +151,18 @@ def main() -> None:
     # V1: classify first N companies (later: only Unknowns / only those appearing in exposures)
     companies = companies.head(args.limit).copy()
 
+    # Load existing classifications to avoid re-classifying
+    out_path = gold / "fact_exposure_classification.csv"
+    existing_df = None
+    already_classified: set[tuple[str, str]] = set()
+    if out_path.exists():
+        existing_df = pd.read_csv(out_path)
+        # Build set of (company_id, taxonomy_type) pairs already classified
+        for _, row in existing_df.iterrows():
+            key = (str(row["company_id"]), str(row["taxonomy_type"]))
+            already_classified.add(key)
+        print(f"Loaded {len(existing_df)} existing classifications from {out_path}")
+
     # Optional fields
     country_col = "country" if "country" in companies.columns else None
     desc_col = "company_description" if "company_description" in companies.columns else None
@@ -159,10 +171,16 @@ def main() -> None:
 
     run_id = str(uuid.uuid4())
     out_rows = []
+    skipped = 0
 
     for _, c in companies.iterrows():
         company_id = str(c["company_id"]) if "company_id" in companies.columns else None
         company_name = str(c["company_name"]) if "company_name" in companies.columns else str(c.get("raw_company_name", ""))
+
+        # Skip if already classified for this taxonomy_type
+        if (company_id, args.taxonomy_type) in already_classified:
+            skipped += 1
+            continue
 
         company_country = str(c[country_col]) if country_col and pd.notna(c[country_col]) else None
         company_desc = str(c[desc_col]) if desc_col and pd.notna(c[desc_col]) else None
@@ -201,12 +219,20 @@ def main() -> None:
             }
         )
 
-    out_df = pd.DataFrame(out_rows)
-    out_path = gold / "fact_exposure_classification.csv"
+    new_df = pd.DataFrame(out_rows)
+
+    # Combine with existing data if present
+    if existing_df is not None:
+        out_df = pd.concat([existing_df, new_df], ignore_index=True)
+    else:
+        out_df = new_df
+
     out_df.to_csv(out_path, index=False)
 
     print("Wrote:", out_path)
-    print("Rows:", len(out_df))
+    print("Skipped (already classified):", skipped)
+    print("New rows:", len(new_df))
+    print("Total rows:", len(out_df))
     print("run_id:", run_id)
     print("model:", cfg.model)
 

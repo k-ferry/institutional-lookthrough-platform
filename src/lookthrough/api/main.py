@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from src.lookthrough.agent.chat import chat as agent_chat
 from src.lookthrough.agent.tools import (
     get_company_exposure,
     get_confidence_distribution,
@@ -68,12 +69,14 @@ class ChatRequest(BaseModel):
 
     message: str
     provider: str = "claude"  # "claude", "openai", or "ollama"
+    conversation_history: Optional[list] = None
 
 
 class ChatResponse(BaseModel):
     """Response body for chat endpoint."""
 
     response: str
+    tools_used: list
     provider: str
 
 
@@ -195,9 +198,12 @@ async def chat(
 ) -> dict:
     """AI chat endpoint for natural language portfolio queries.
 
-    Currently returns a placeholder response. AI agent integration coming next.
+    Uses tool-calling to query portfolio data and provide accurate answers.
+    Supports three providers: claude (default), openai, and ollama.
     """
-    return {
-        "response": "Chat endpoint ready. AI agent integration coming next.",
-        "provider": request.provider,
-    }
+    result = await agent_chat(
+        message=request.message,
+        provider=request.provider,
+        conversation_history=request.conversation_history,
+    )
+    return result
