@@ -7,3 +7,4 @@ httpx
 pydantic
 fastapi
 uvicorn
+edgartools
