@@ -1143,19 +1143,37 @@ def main():
         holdings_df, fund_df, fund_report_df = parse_bdc_filing(args.file)
 
         # Write outputs to silver layer with bdc_ prefix
+        # Append to existing files if they exist, then deduplicate
         SILVER_DIR.mkdir(parents=True, exist_ok=True)
 
         holdings_path = SILVER_DIR / "bdc_fact_reported_holding.csv"
         fund_path = SILVER_DIR / "bdc_dim_fund.csv"
         report_path = SILVER_DIR / "bdc_fact_fund_report.csv"
 
+        # Append holdings and deduplicate by reported_holding_id
+        if holdings_path.exists():
+            existing_holdings = pd.read_csv(holdings_path)
+            holdings_df = pd.concat([existing_holdings, holdings_df], ignore_index=True)
+            holdings_df = holdings_df.drop_duplicates(subset=["reported_holding_id"], keep="last")
         holdings_df.to_csv(holdings_path, index=False)
+
+        # Append funds and deduplicate by fund_id
+        if fund_path.exists():
+            existing_funds = pd.read_csv(fund_path)
+            fund_df = pd.concat([existing_funds, fund_df], ignore_index=True)
+            fund_df = fund_df.drop_duplicates(subset=["fund_id"], keep="last")
         fund_df.to_csv(fund_path, index=False)
+
+        # Append fund reports and deduplicate by fund_report_id
+        if report_path.exists():
+            existing_reports = pd.read_csv(report_path)
+            fund_report_df = pd.concat([existing_reports, fund_report_df], ignore_index=True)
+            fund_report_df = fund_report_df.drop_duplicates(subset=["fund_report_id"], keep="last")
         fund_report_df.to_csv(report_path, index=False)
 
-        logger.info(f"Wrote {len(holdings_df)} holdings to {holdings_path}")
-        logger.info(f"Wrote fund record to {fund_path}")
-        logger.info(f"Wrote fund report to {report_path}")
+        logger.info(f"Wrote {len(holdings_df)} total holdings to {holdings_path}")
+        logger.info(f"Wrote {len(fund_df)} total funds to {fund_path}")
+        logger.info(f"Wrote {len(fund_report_df)} total fund reports to {report_path}")
 
         print_summary(holdings_df)
 

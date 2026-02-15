@@ -8,3 +8,5 @@ pydantic
 fastapi
 uvicorn
 edgartools
+beautifulsoup4
+lxml

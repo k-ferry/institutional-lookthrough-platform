@@ -19,6 +19,11 @@ STEPS = [
         'always': True,
     },
     {
+        'name': 'Load Data Sources',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.ingestion.load_sources'],
+        'always': True,
+    },
+    {
         'name': 'Entity Resolution',
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.entity_resolution'],
         'always': True,
