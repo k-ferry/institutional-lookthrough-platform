@@ -133,6 +133,84 @@ def _get_company_classifications(
     return company_class
 
 
+def _get_fund_holdings_with_gics(
+    fund_name: str,
+    as_of_date: Optional[str] = None,
+) -> tuple[pd.DataFrame, str, str]:
+    """
+    Get holdings for a fund with GICS mapping applied.
+
+    Returns:
+        Tuple of (holdings_df with GICS columns, as_of_date, matched_fund_name)
+        holdings_df has columns: reported_value_usd, gics_sector_name, gics_industry_name, confidence
+    """
+    root = _repo_root()
+    gold = root / "data" / "gold"
+    silver = root / "data" / "silver"
+
+    # Load required data
+    holdings = _read_csv(silver / "fact_reported_holding.csv")
+    fund_reports = _read_csv(silver / "fact_fund_report.csv")
+    funds = _read_csv(silver / "dim_fund.csv")
+    gics_mapping = _read_csv(gold / "gics_mapping.csv")
+
+    if holdings.empty:
+        return pd.DataFrame(), as_of_date or "", ""
+
+    # Find matching fund
+    if funds.empty:
+        return pd.DataFrame(), as_of_date or "", ""
+
+    matching_funds = funds[funds["fund_name"].str.lower().str.contains(fund_name.lower(), na=False)]
+    if matching_funds.empty:
+        return pd.DataFrame(), as_of_date or "", ""
+
+    matched_fund_name = matching_funds["fund_name"].iloc[0]
+    matching_fund_ids = set(matching_funds["fund_id"].astype(str).tolist())
+
+    # Find fund reports for matching funds
+    if fund_reports.empty:
+        return pd.DataFrame(), as_of_date or "", matched_fund_name
+
+    fund_reports = fund_reports[fund_reports["fund_id"].astype(str).isin(matching_fund_ids)]
+    if fund_reports.empty:
+        return pd.DataFrame(), as_of_date or "", matched_fund_name
+
+    # Filter by date if provided
+    if as_of_date:
+        fund_reports = fund_reports[fund_reports["report_period_end"] == as_of_date]
+    else:
+        as_of_date = fund_reports["report_period_end"].max()
+        fund_reports = fund_reports[fund_reports["report_period_end"] == as_of_date]
+
+    if fund_reports.empty:
+        return pd.DataFrame(), as_of_date or "", matched_fund_name
+
+    # Get holdings for these fund reports
+    matching_report_ids = set(fund_reports["fund_report_id"].astype(str).tolist())
+    holdings = holdings[holdings["fund_report_id"].astype(str).isin(matching_report_ids)]
+
+    if holdings.empty:
+        return pd.DataFrame(), as_of_date, matched_fund_name
+
+    # Join with GICS mapping on reported_sector
+    holdings = holdings.merge(
+        gics_mapping[["reported_sector", "gics_sector_name", "gics_industry_name", "confidence"]],
+        on="reported_sector",
+        how="left",
+    )
+
+    # Fill missing GICS data for unmapped sectors
+    holdings["gics_sector_name"] = holdings["gics_sector_name"].fillna("Unknown")
+    holdings["gics_industry_name"] = holdings["gics_industry_name"].fillna("Unknown")
+    holdings["confidence"] = holdings["confidence"].fillna(0.0)
+
+    # Use reported_value_usd, fill missing with 0
+    holdings["reported_value_usd"] = pd.to_numeric(holdings["reported_value_usd"], errors="coerce").fillna(0.0)
+
+    return holdings, as_of_date, matched_fund_name
+
+
 def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[str] = None) -> dict:
     """
     Get portfolio exposure breakdown by sector.
@@ -161,71 +239,39 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
     taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
     taxonomy_lookup = _build_taxonomy_lookup(taxonomy)
 
-    # If fund_name filter provided, aggregate from raw exposures
+    # If fund_name filter provided, use GICS mapping on reported holdings
     if fund_name:
-        exposures = _read_csv(gold / "fact_inferred_exposure.csv")
-        funds = _read_csv(silver / "dim_fund.csv")
-        companies = _read_csv(silver / "dim_company.csv")
-        classifications = _read_csv(gold / "fact_exposure_classification.csv")
+        holdings, as_of_date, matched_fund_name = _get_fund_holdings_with_gics(fund_name, as_of_date)
 
-        if exposures.empty:
-            return {"error": "No exposure data available", "sectors": [], "fund_name_filter": fund_name}
+        if holdings.empty:
+            return {"error": f"No holdings data for fund '{fund_name}'", "sectors": [], "fund_name_filter": fund_name}
 
-        # Filter by fund
-        exposures = _filter_exposures_by_fund(exposures, funds, fund_name)
-        if exposures.empty:
-            return {"error": f"No exposure data for fund '{fund_name}'", "sectors": [], "fund_name_filter": fund_name}
-
-        # Filter by date
-        if as_of_date:
-            exposures = exposures[exposures["as_of_date"] == as_of_date]
-        else:
-            as_of_date = exposures["as_of_date"].max()
-            exposures = exposures[exposures["as_of_date"] == as_of_date]
-
-        if exposures.empty:
-            return {"error": f"No exposure data for date {as_of_date}", "sectors": [], "fund_name_filter": fund_name}
-
-        # Get company classifications
-        company_class = _get_company_classifications(companies, classifications, taxonomy_lookup)
-
-        # Assign sector to each exposure
-        def get_sector_info(row):
-            cid = str(row["company_id"]) if pd.notna(row.get("company_id")) else None
-            if cid and cid in company_class:
-                return company_class[cid]["sector_node_id"], company_class[cid]["confidence"]
-            return UNKNOWN_TAXONOMY_NODE_ID, 0.0
-
-        exposures["sector_node_id"], exposures["confidence"] = zip(*exposures.apply(get_sector_info, axis=1))
-        exposures["confidence_weighted"] = exposures["exposure_value_usd"] * exposures["confidence"]
-
-        # Aggregate by sector
-        sector_agg = exposures.groupby("sector_node_id").agg({
-            "exposure_value_usd": "sum",
-            "confidence_weighted": "sum",
+        # Aggregate by GICS sector
+        sector_agg = holdings.groupby("gics_sector_name").agg({
+            "reported_value_usd": "sum",
+            "confidence": "mean",
         }).reset_index()
+        sector_agg.columns = ["gics_sector_name", "total_exposure_value_usd", "avg_confidence"]
 
-        total_exposure = sector_agg["exposure_value_usd"].sum()
-        unknown_row = sector_agg[sector_agg["sector_node_id"] == UNKNOWN_TAXONOMY_NODE_ID]
-        unknown_exposure = unknown_row["exposure_value_usd"].sum() if not unknown_row.empty else 0.0
+        total_exposure = sector_agg["total_exposure_value_usd"].sum()
+        unknown_row = sector_agg[sector_agg["gics_sector_name"] == "Unknown"]
+        unknown_exposure = unknown_row["total_exposure_value_usd"].sum() if not unknown_row.empty else 0.0
         unknown_pct = (unknown_exposure / total_exposure * 100) if total_exposure > 0 else 0.0
         known_exposure = total_exposure - unknown_exposure
         coverage_pct = (known_exposure / total_exposure) if total_exposure > 0 else 0.0
 
-        # Build sector list
-        known_sectors = sector_agg[sector_agg["sector_node_id"] != UNKNOWN_TAXONOMY_NODE_ID]
+        # Build sector list (excluding Unknown)
+        known_sectors = sector_agg[sector_agg["gics_sector_name"] != "Unknown"]
         sectors = []
         for _, row in known_sectors.iterrows():
-            node_id = str(row["sector_node_id"])
-            node_info = taxonomy_lookup["node_by_id"].get(node_id, {})
             sectors.append({
-                "sector_name": node_info.get("node_name", "Unknown"),
-                "taxonomy_node_id": node_id,
-                "total_exposure_value_usd": float(row["exposure_value_usd"]),
-                "exposure_pct": float(row["exposure_value_usd"] / total_exposure * 100) if total_exposure > 0 else 0.0,
-                "confidence_weighted_exposure": float(row["confidence_weighted"]),
+                "sector_name": str(row["gics_sector_name"]),
+                "total_exposure_value_usd": float(row["total_exposure_value_usd"]),
+                "exposure_pct": float(row["total_exposure_value_usd"] / total_exposure * 100) if total_exposure > 0 else 0.0,
+                "avg_confidence": float(row["avg_confidence"]),
             })
 
+        # Sort by exposure value descending
         sectors.sort(key=lambda x: x["total_exposure_value_usd"], reverse=True)
 
         return {
@@ -233,7 +279,7 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
             "total_portfolio_value_usd": float(total_exposure),
             "coverage_pct": float(coverage_pct * 100),
             "unknown_exposure_pct": float(unknown_pct),
-            "fund_name_filter": fund_name,
+            "fund_name_filter": matched_fund_name,
             "sector_count": len(sectors),
             "sectors": sectors,
         }
@@ -325,91 +371,57 @@ def get_industry_exposure(sector: Optional[str] = None, as_of_date: Optional[str
     taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
     taxonomy_lookup = _build_taxonomy_lookup(taxonomy)
 
-    # If fund_name filter provided, aggregate from raw exposures
+    # If fund_name filter provided, use GICS mapping on reported holdings
     if fund_name:
-        exposures = _read_csv(gold / "fact_inferred_exposure.csv")
-        funds = _read_csv(silver / "dim_fund.csv")
-        companies = _read_csv(silver / "dim_company.csv")
-        classifications = _read_csv(gold / "fact_exposure_classification.csv")
+        holdings, as_of_date, matched_fund_name = _get_fund_holdings_with_gics(fund_name, as_of_date)
 
-        if exposures.empty:
-            return {"error": "No exposure data available", "industries": [], "fund_name_filter": fund_name}
+        if holdings.empty:
+            return {"error": f"No holdings data for fund '{fund_name}'", "industries": [], "fund_name_filter": fund_name}
 
-        # Filter by fund
-        exposures = _filter_exposures_by_fund(exposures, funds, fund_name)
-        if exposures.empty:
-            return {"error": f"No exposure data for fund '{fund_name}'", "industries": [], "fund_name_filter": fund_name}
-
-        # Filter by date
-        if as_of_date:
-            exposures = exposures[exposures["as_of_date"] == as_of_date]
-        else:
-            as_of_date = exposures["as_of_date"].max()
-            exposures = exposures[exposures["as_of_date"] == as_of_date]
-
-        if exposures.empty:
-            return {"error": f"No exposure data for date {as_of_date}", "industries": [], "fund_name_filter": fund_name}
-
-        # Get company classifications
-        company_class = _get_company_classifications(companies, classifications, taxonomy_lookup)
-
-        # Assign industry to each exposure
-        def get_industry_info(row):
-            cid = str(row["company_id"]) if pd.notna(row.get("company_id")) else None
-            if cid and cid in company_class:
-                return company_class[cid]["industry_node_id"], company_class[cid]["sector_node_id"], company_class[cid]["confidence"]
-            return UNKNOWN_TAXONOMY_NODE_ID, UNKNOWN_TAXONOMY_NODE_ID, 0.0
-
-        exposures["industry_node_id"], exposures["sector_node_id"], exposures["confidence"] = zip(*exposures.apply(get_industry_info, axis=1))
-        exposures["confidence_weighted"] = exposures["exposure_value_usd"] * exposures["confidence"]
-
-        # If sector filter provided, filter to that sector
+        # If sector filter provided, filter to that GICS sector
         if sector:
-            sector_node_id = taxonomy_lookup["id_by_name"].get(("sector", sector.lower()))
-            if not sector_node_id:
-                return {"error": f"Sector '{sector}' not found", "industries": [], "fund_name_filter": fund_name}
-            exposures = exposures[exposures["sector_node_id"] == sector_node_id]
+            holdings = holdings[holdings["gics_sector_name"].str.lower() == sector.lower()]
+            if holdings.empty:
+                return {
+                    "error": f"No holdings in sector '{sector}'",
+                    "industries": [],
+                    "fund_name_filter": matched_fund_name,
+                    "sector_filter": sector,
+                }
 
-        if exposures.empty:
-            return {"error": f"No exposure data matching filters", "industries": [], "fund_name_filter": fund_name, "sector_filter": sector}
-
-        # Aggregate by industry
-        industry_agg = exposures.groupby("industry_node_id").agg({
-            "exposure_value_usd": "sum",
-            "confidence_weighted": "sum",
+        # Aggregate by GICS industry
+        industry_agg = holdings.groupby(["gics_industry_name", "gics_sector_name"]).agg({
+            "reported_value_usd": "sum",
+            "confidence": "mean",
         }).reset_index()
+        industry_agg.columns = ["gics_industry_name", "gics_sector_name", "total_exposure_value_usd", "avg_confidence"]
 
-        total_exposure = industry_agg["exposure_value_usd"].sum()
-        unknown_row = industry_agg[industry_agg["industry_node_id"] == UNKNOWN_TAXONOMY_NODE_ID]
-        unknown_exposure = unknown_row["exposure_value_usd"].sum() if not unknown_row.empty else 0.0
+        total_exposure = industry_agg["total_exposure_value_usd"].sum()
+        unknown_row = industry_agg[industry_agg["gics_industry_name"] == "Unknown"]
+        unknown_exposure = unknown_row["total_exposure_value_usd"].sum() if not unknown_row.empty else 0.0
         unknown_pct = (unknown_exposure / total_exposure * 100) if total_exposure > 0 else 0.0
         known_exposure = total_exposure - unknown_exposure
         coverage_pct = (known_exposure / total_exposure) if total_exposure > 0 else 0.0
 
-        # Build industry list
-        known_industries = industry_agg[industry_agg["industry_node_id"] != UNKNOWN_TAXONOMY_NODE_ID]
+        # Build industry list (excluding Unknown)
+        known_industries = industry_agg[industry_agg["gics_industry_name"] != "Unknown"]
         industries = []
         for _, row in known_industries.iterrows():
-            node_id = str(row["industry_node_id"])
-            node_info = taxonomy_lookup["node_by_id"].get(node_id, {})
-            parent_id = node_info.get("parent_node_id")
-            parent_info = taxonomy_lookup["node_by_id"].get(parent_id, {}) if parent_id else {}
-
             industries.append({
-                "industry_name": node_info.get("node_name", "Unknown"),
-                "sector_name": parent_info.get("node_name", "Unknown"),
-                "taxonomy_node_id": node_id,
-                "total_exposure_value_usd": float(row["exposure_value_usd"]),
-                "exposure_pct": float(row["exposure_value_usd"] / total_exposure * 100) if total_exposure > 0 else 0.0,
-                "confidence_weighted_exposure": float(row["confidence_weighted"]),
+                "industry_name": str(row["gics_industry_name"]),
+                "sector_name": str(row["gics_sector_name"]),
+                "total_exposure_value_usd": float(row["total_exposure_value_usd"]),
+                "exposure_pct": float(row["total_exposure_value_usd"] / total_exposure * 100) if total_exposure > 0 else 0.0,
+                "avg_confidence": float(row["avg_confidence"]),
             })
 
+        # Sort by exposure value descending
         industries.sort(key=lambda x: x["total_exposure_value_usd"], reverse=True)
 
         return {
             "as_of_date": as_of_date,
             "sector_filter": sector,
-            "fund_name_filter": fund_name,
+            "fund_name_filter": matched_fund_name,
             "total_exposure_usd": float(total_exposure),
             "coverage_pct": float(coverage_pct * 100),
             "unknown_exposure_pct": float(unknown_pct),
