@@ -103,20 +103,33 @@ async def health() -> dict:
 @app.get("/api/v1/exposure/sector")
 async def exposure_sector(
     as_of_date: Optional[str] = None,
+    fund_name: Optional[str] = None,
     _: None = Depends(verify_api_key),
 ) -> dict:
-    """Get portfolio exposure breakdown by sector."""
-    return get_sector_exposure(as_of_date=as_of_date)
+    """Get portfolio exposure breakdown by sector.
+
+    Args:
+        as_of_date: Optional date filter (YYYY-MM-DD). Uses most recent if not provided.
+        fund_name: Optional fund name to filter (case-insensitive partial match).
+    """
+    return get_sector_exposure(as_of_date=as_of_date, fund_name=fund_name)
 
 
 @app.get("/api/v1/exposure/industry")
 async def exposure_industry(
     sector: Optional[str] = None,
     as_of_date: Optional[str] = None,
+    fund_name: Optional[str] = None,
     _: None = Depends(verify_api_key),
 ) -> dict:
-    """Get portfolio exposure breakdown by industry."""
-    return get_industry_exposure(sector=sector, as_of_date=as_of_date)
+    """Get portfolio exposure breakdown by industry.
+
+    Args:
+        sector: Optional sector name to filter industries (e.g., "Technology").
+        as_of_date: Optional date filter (YYYY-MM-DD). Uses most recent if not provided.
+        fund_name: Optional fund name to filter (case-insensitive partial match).
+    """
+    return get_industry_exposure(sector=sector, as_of_date=as_of_date, fund_name=fund_name)
 
 
 @app.get("/api/v1/exposure/geography")
@@ -141,10 +154,17 @@ async def exposure_fund(
 async def exposure_company(
     company_name: Optional[str] = None,
     top_n: int = 20,
+    fund_name: Optional[str] = None,
     _: None = Depends(verify_api_key),
 ) -> dict:
-    """Get portfolio exposure breakdown by company."""
-    return get_company_exposure(company_name=company_name, top_n=top_n)
+    """Get portfolio exposure breakdown by company.
+
+    Args:
+        company_name: Optional company name to search (case-insensitive partial match).
+        top_n: Number of top companies to return (default 20).
+        fund_name: Optional fund name to filter (case-insensitive partial match).
+    """
+    return get_company_exposure(company_name=company_name, top_n=top_n, fund_name=fund_name)
 
 
 # ----------------------------------------------------------------------------

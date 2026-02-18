@@ -130,11 +130,85 @@ def _load_classifications(gold_path: Path) -> dict:
     return lookup
 
 
+def _load_reported_sector_lookup(silver_path: Path) -> dict:
+    """
+    Load reported_sector values from holdings to use as fallback classification.
+
+    Returns lookup: company_id -> reported_sector (string)
+    """
+    holdings_file = silver_path / "fact_reported_holding.csv"
+    if not holdings_file.exists():
+        return {}
+
+    df = pd.read_csv(holdings_file)
+    lookup = {}
+
+    # For each company_id, collect reported_sector values
+    # If multiple holdings have different sectors, we take the most common one
+    for _, row in df.iterrows():
+        company_id = row.get("company_id")
+        reported_sector = row.get("reported_sector")
+
+        if not company_id or pd.isna(company_id):
+            continue
+        if not reported_sector or pd.isna(reported_sector):
+            continue
+
+        company_id = str(company_id)
+        reported_sector = str(reported_sector).strip()
+        if not reported_sector:
+            continue
+
+        # Store the first non-empty reported_sector per company
+        if company_id not in lookup:
+            lookup[company_id] = reported_sector
+
+    return lookup
+
+
+def _build_reported_sector_to_taxonomy_lookup(taxonomy_df: pd.DataFrame) -> dict:
+    """
+    Build lookup from reported_sector names to taxonomy_node_id.
+
+    Maps sector/industry names (case-insensitive) to their taxonomy_node_id.
+    Prioritizes exact matches, handles both sector (level 1) and industry (level 2) nodes.
+
+    Returns lookup: sector_name_lower -> taxonomy_node_id
+    """
+    lookup = {}
+    if taxonomy_df.empty:
+        return lookup
+
+    for _, row in taxonomy_df.iterrows():
+        node_name = row.get("node_name")
+        if not node_name or pd.isna(node_name):
+            continue
+
+        node_id = str(row["taxonomy_node_id"])
+        taxonomy_type = str(row.get("taxonomy_type", ""))
+        level = int(row.get("level", 0)) if pd.notna(row.get("level")) else 0
+
+        # Only map sector (level 1) and industry (level 2) nodes
+        if taxonomy_type == "sector" and level in (1, 2):
+            name_lower = str(node_name).strip().lower()
+            # Don't overwrite existing entries (first wins)
+            if name_lower not in lookup:
+                lookup[name_lower] = node_id
+
+    return lookup
+
+
 def aggregate_exposures_v1() -> pd.DataFrame:
     """
     V1 aggregation: group inferred exposures by taxonomy buckets.
 
     Produces one row per (run_id, portfolio_id, as_of_date, taxonomy_type, taxonomy_node_id).
+
+    Classification priority:
+    1. AI classifications from fact_exposure_classification.csv (highest priority)
+    2. reported_sector from holdings (confidence 0.75)
+    3. Deterministic lookup from dim_company (confidence 1.0)
+    4. Unknown (confidence 0.0)
     """
     root = _repo_root()
     silver = root / "data" / "silver"
@@ -154,6 +228,14 @@ def aggregate_exposures_v1() -> pd.DataFrame:
     if use_ai_classifications:
         print(f"Using AI classifications: {len(classification_lookup)} entries")
 
+    # Load reported_sector from holdings as fallback classification source
+    reported_sector_lookup = _load_reported_sector_lookup(silver)
+    if reported_sector_lookup:
+        print(f"Using reported_sector fallback: {len(reported_sector_lookup)} companies")
+
+    # Build lookup from reported_sector names to taxonomy_node_id
+    sector_name_to_node = _build_reported_sector_to_taxonomy_lookup(taxonomy)
+
     # Build company lookup: company_id -> {industry_taxonomy_node_id, country_taxonomy_node_id}
     company_lookup = {}
     for _, row in companies.iterrows():
@@ -162,6 +244,9 @@ def aggregate_exposures_v1() -> pd.DataFrame:
             "industry_taxonomy_node_id": row.get("industry_taxonomy_node_id"),
             "country_taxonomy_node_id": row.get("country_taxonomy_node_id"),
         }
+
+    # Confidence for reported_sector classifications (structured data from filing)
+    REPORTED_SECTOR_CONFIDENCE = 0.75
 
     # For each exposure, determine taxonomy node IDs for sector, industry, geography
     def resolve_taxonomy(row) -> dict:
@@ -179,20 +264,30 @@ def aggregate_exposures_v1() -> pd.DataFrame:
         company_id = str(company_id)
         company = company_lookup.get(company_id, {})
 
-        # Check for AI classification for industry
+        industry_resolved = UNKNOWN_TAXONOMY_NODE_ID
+        industry_confidence = 0.0
+
+        # Priority 1: Check for AI classification for industry
         ai_industry = classification_lookup.get((company_id, "industry"))
         if ai_industry:
             industry_resolved = ai_industry["taxonomy_node_id"]
             industry_confidence = ai_industry["confidence"]
         else:
-            # Fallback to deterministic lookup
-            industry_node_id = company.get("industry_taxonomy_node_id")
-            if industry_node_id and not pd.isna(industry_node_id):
-                industry_resolved = str(industry_node_id)
-                industry_confidence = 1.0  # Deterministic = full confidence
-            else:
-                industry_resolved = UNKNOWN_TAXONOMY_NODE_ID
-                industry_confidence = 0.0
+            # Priority 2: Check for reported_sector from holdings
+            reported_sector = reported_sector_lookup.get(company_id)
+            if reported_sector:
+                # Map reported_sector name to taxonomy_node_id
+                sector_lower = reported_sector.lower()
+                if sector_lower in sector_name_to_node:
+                    industry_resolved = sector_name_to_node[sector_lower]
+                    industry_confidence = REPORTED_SECTOR_CONFIDENCE
+
+            # Priority 3: Fallback to deterministic lookup from dim_company
+            if industry_resolved == UNKNOWN_TAXONOMY_NODE_ID:
+                industry_node_id = company.get("industry_taxonomy_node_id")
+                if industry_node_id and not pd.isna(industry_node_id):
+                    industry_resolved = str(industry_node_id)
+                    industry_confidence = 1.0  # Deterministic = full confidence
 
         # Sector node ID (level 1) - get parent of industry
         sector_resolved = _get_sector_node_id(industry_resolved, taxonomy_lookup)
