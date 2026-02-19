@@ -29,6 +29,11 @@ STEPS = [
         'always': True,
     },
     {
+        'name': 'Company Consolidation',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.inference.entity_resolution', '--consolidate'],
+        'always': True,
+    },
+    {
         'name': 'Exposure Inference',
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.exposure'],
         'always': True,
