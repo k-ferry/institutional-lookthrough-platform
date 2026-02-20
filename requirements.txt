@@ -10,3 +10,5 @@ uvicorn
 edgartools
 beautifulsoup4
 lxml
+sqlalchemy
+psycopg2-binary
