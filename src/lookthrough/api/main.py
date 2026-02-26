@@ -26,6 +26,8 @@ from src.lookthrough.agent.tools import (
     get_review_queue,
     get_sector_exposure,
 )
+from src.lookthrough.auth import auth_router
+from src.lookthrough.db.engine import init_db
 
 app = FastAPI(
     title="Institutional Lookthrough Platform API",
@@ -33,14 +35,23 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware - allow all origins for development
+# CORS middleware - configured for Vite dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register authentication router
+app.include_router(auth_router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database tables on startup."""
+    init_db()
 
 
 # ----------------------------------------------------------------------------

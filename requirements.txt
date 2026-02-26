@@ -5,6 +5,7 @@ anthropic
 openai
 httpx
 pydantic
+pydantic[email]
 fastapi
 uvicorn
 edgartools
@@ -12,3 +13,5 @@ beautifulsoup4
 lxml
 sqlalchemy
 psycopg2-binary
+python-jose[cryptography]
+passlib[bcrypt]

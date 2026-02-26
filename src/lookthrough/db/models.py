@@ -4,7 +4,9 @@ Uses SQLAlchemy 2.0 style with DeclarativeBase.
 All models match the existing CSV schema exactly.
 """
 
-from sqlalchemy import Float, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -12,6 +14,26 @@ class Base(DeclarativeBase):
     """Base class for all ORM models."""
 
     pass
+
+
+# =============================================================================
+# Authentication Models
+# =============================================================================
+
+
+class User(Base):
+    """User account for authentication."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
 
 # =============================================================================
@@ -25,7 +47,7 @@ class DimPortfolio(Base):
     __tablename__ = "dim_portfolio"
 
     portfolio_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    portfolio_name: Mapped[str] = mapped_column(String(255))
+    portfolio_name: Mapped[str] = mapped_column(String(500))
     base_currency: Mapped[str] = mapped_column(String(10))
     owner_type: Mapped[str] = mapped_column(String(100), nullable=True)
     created_at: Mapped[str] = mapped_column(String(50), nullable=True)
@@ -38,8 +60,8 @@ class DimFund(Base):
     __tablename__ = "dim_fund"
 
     fund_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    fund_name: Mapped[str] = mapped_column(String(255))
-    manager_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    fund_name: Mapped[str] = mapped_column(String(500))
+    manager_name: Mapped[str] = mapped_column(String(500), nullable=True)
     fund_type: Mapped[str] = mapped_column(String(100), nullable=True)
     strategy: Mapped[str] = mapped_column(String(100), nullable=True)
     vintage_year: Mapped[float] = mapped_column(Float, nullable=True)
@@ -54,8 +76,8 @@ class DimCompany(Base):
 
     company_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     company_name: Mapped[str] = mapped_column(String(500))
-    primary_sector: Mapped[str] = mapped_column(String(255), nullable=True)
-    primary_industry: Mapped[str] = mapped_column(String(255), nullable=True)
+    primary_sector: Mapped[str] = mapped_column(Text, nullable=True)
+    primary_industry: Mapped[str] = mapped_column(Text, nullable=True)
     primary_country: Mapped[str] = mapped_column(String(100), nullable=True)
     industry_taxonomy_node_id: Mapped[str] = mapped_column(String(36), nullable=True)
     country_taxonomy_node_id: Mapped[str] = mapped_column(String(36), nullable=True)
@@ -71,7 +93,7 @@ class DimEntityAlias(Base):
 
     alias_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     entity_type: Mapped[str] = mapped_column(String(50))
-    entity_id: Mapped[str] = mapped_column(String(36))
+    entity_id: Mapped[str] = mapped_column(String(100))  # consolidation IDs can be 51+ chars
     alias_text: Mapped[str] = mapped_column(String(500))
     confidence: Mapped[float] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=True)
@@ -85,7 +107,7 @@ class DimTaxonomyNode(Base):
     taxonomy_node_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     taxonomy_version_id: Mapped[str] = mapped_column(String(36))
     taxonomy_type: Mapped[str] = mapped_column(String(50))
-    node_name: Mapped[str] = mapped_column(String(255))
+    node_name: Mapped[str] = mapped_column(String(500))
     parent_node_id: Mapped[str] = mapped_column(String(36), nullable=True)
     path: Mapped[str] = mapped_column(String(1000), nullable=True)
     level: Mapped[float] = mapped_column(Float, nullable=True)
@@ -98,7 +120,7 @@ class MetaTaxonomyVersion(Base):
     __tablename__ = "meta_taxonomy_version"
 
     taxonomy_version_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    version_name: Mapped[str] = mapped_column(String(100))
+    version_name: Mapped[str] = mapped_column(String(500))
     source_uri: Mapped[str] = mapped_column(String(500), nullable=True)
     created_at: Mapped[str] = mapped_column(String(50), nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=True)
@@ -156,7 +178,7 @@ class FactInferredExposure(Base):
 
     __tablename__ = "fact_inferred_exposure"
 
-    exposure_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    exposure_id: Mapped[str] = mapped_column(String(100), primary_key=True)  # consolidation IDs can be 51+ chars
     run_id: Mapped[str] = mapped_column(String(36))
     portfolio_id: Mapped[str] = mapped_column(String(36))
     fund_id: Mapped[str] = mapped_column(String(36))
@@ -217,11 +239,11 @@ class FactReviewQueueItem(Base):
 
     queue_item_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(36))
-    exposure_id: Mapped[str] = mapped_column(String(36), nullable=True)
-    reported_holding_id: Mapped[str] = mapped_column(String(36), nullable=True)
+    exposure_id: Mapped[str] = mapped_column(String(100), nullable=True)  # consolidation IDs can be 51+ chars
+    reported_holding_id: Mapped[str] = mapped_column(String(100), nullable=True)  # consolidation IDs can be 51+ chars
     company_id: Mapped[str] = mapped_column(String(36), nullable=True)
     raw_company_name: Mapped[str] = mapped_column(String(500), nullable=True)
-    reason: Mapped[str] = mapped_column(String(255))
+    reason: Mapped[str] = mapped_column(Text)
     priority: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(50))
     created_at: Mapped[str] = mapped_column(String(50))
@@ -239,7 +261,7 @@ class FactAuditEvent(Base):
     actor_id: Mapped[str] = mapped_column(String(100))
     action: Mapped[str] = mapped_column(String(100))
     entity_type: Mapped[str] = mapped_column(String(50))
-    entity_id: Mapped[str] = mapped_column(String(36))
+    entity_id: Mapped[str] = mapped_column(String(100))  # consolidation IDs can be 51+ chars
     payload_json: Mapped[str] = mapped_column(Text, nullable=True)
 
 
@@ -249,7 +271,8 @@ class EntityResolutionLog(Base):
     __tablename__ = "entity_resolution_log"
 
     # Use reported_holding_id as primary key since each holding gets one resolution entry
-    reported_holding_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # Note: consolidation records use IDs like "consolidation_xxx" which can be 51+ chars
+    reported_holding_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     raw_company_name: Mapped[str] = mapped_column(String(500), nullable=True)
     matched_company_id: Mapped[str] = mapped_column(String(36), nullable=True)
     match_method: Mapped[str] = mapped_column(String(50), nullable=True)
@@ -272,12 +295,12 @@ class GICSMapping(Base):
     # Use reported_sector as primary key
     reported_sector: Mapped[str] = mapped_column(Text, primary_key=True)
     gics_sector_code: Mapped[float] = mapped_column(Float, nullable=True)
-    gics_sector_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    gics_sector_name: Mapped[str] = mapped_column(String(500), nullable=True)
     gics_industry_group_code: Mapped[float] = mapped_column(Float, nullable=True)
-    gics_industry_group_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    gics_industry_group_name: Mapped[str] = mapped_column(String(500), nullable=True)
     gics_industry_code: Mapped[float] = mapped_column(Float, nullable=True)
-    gics_industry_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    gics_industry_name: Mapped[str] = mapped_column(String(500), nullable=True)
     gics_sub_industry_code: Mapped[float] = mapped_column(Float, nullable=True)
-    gics_sub_industry_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    gics_sub_industry_name: Mapped[str] = mapped_column(String(500), nullable=True)
     confidence: Mapped[float] = mapped_column(Float, nullable=True)
     rationale: Mapped[str] = mapped_column(Text, nullable=True)
