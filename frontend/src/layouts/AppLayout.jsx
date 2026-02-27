@@ -15,7 +15,7 @@ const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/holdings', label: 'Holdings', icon: Briefcase },
   { to: '/funds', label: 'Funds', icon: Building2 },
-  { to: '/assistant', label: 'AI Assistant', icon: Bot },
+  { to: '/agent', label: 'AI Assistant', icon: Bot },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
