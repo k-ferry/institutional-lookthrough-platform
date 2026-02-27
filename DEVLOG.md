@@ -184,4 +184,21 @@ Connecting the AI classification and GICS mapping side pipelines into the main P
 
 **Inventory audit completed:** Full repository audit documented — all modules, tables, columns, endpoints, and data gaps catalogued.
 
-**Next session:** Phase 6 Fix 1 — connect `ai/classify_companies.py` to PostgreSQL so classifications persist to the database and are visible in the dashboard sector breakdown.
+### 2026-02-27 — Session 2
+
+**What was built:**
+- Phase 6 Fix 1: Connected AI classification and GICS mapping to PostgreSQL — 857 GICS mappings written, 1,089 dim_company rows updated with real sector/industry labels
+- Phase 6 Fix 2: Review queue workflow — approve/reject/dismiss endpoints, bulk actions, reviewer notes, resolved_at/resolved_by tracking
+- Phase 7: Full Ops Interface — Review Queue UI (73 items, inline and bulk actions), Audit Trail (7,749 events, expandable JSON payloads), Pipeline Monitor (coverage metrics, data quality progress bars, pipeline run history)
+- Sidebar redesigned with FRONT OFFICE / OPS sections
+
+**Key numbers after this session:**
+- 82.8% classification coverage (will improve after overnight full classification run)
+- 99.9% entity resolution rate
+- 73 review queue items (16 high priority)
+- 7,749 audit events across 2 pipeline runs
+
+**Running overnight:**
+- `python run_pipeline.py --classify --limit 9999` — will classify remaining ~1,294 companies
+
+**Next session:** Phase 8 — Front Office polish (geography exposure, fund detail page, company detail page)
