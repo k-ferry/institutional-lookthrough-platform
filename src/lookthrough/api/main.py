@@ -28,6 +28,7 @@ from src.lookthrough.agent.tools import (
 )
 from src.lookthrough.api.routes.agent import router as agent_router
 from src.lookthrough.api.routes.dashboard import router as dashboard_router
+from src.lookthrough.api.routes.holdings import router as holdings_router
 from src.lookthrough.auth import auth_router
 from src.lookthrough.db.engine import init_db
 
@@ -49,6 +50,7 @@ app.add_middleware(
 # Register routers
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+app.include_router(holdings_router)
 app.include_router(agent_router)
 
 

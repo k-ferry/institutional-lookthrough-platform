@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import AppLayout from './layouts/AppLayout'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
+import HoldingsPage from './pages/HoldingsPage'
 import AgentPage from './pages/AgentPage'
 import NotFound from './pages/NotFound'
 
@@ -50,7 +51,7 @@ function AppRoutes() {
         }
       >
         <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/holdings" element={<DashboardPage />} />
+        <Route path="/holdings" element={<HoldingsPage />} />
         <Route path="/funds" element={<DashboardPage />} />
         <Route path="/agent" element={<AgentPage />} />
         <Route path="/settings" element={<DashboardPage />} />
