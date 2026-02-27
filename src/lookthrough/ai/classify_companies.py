@@ -13,6 +13,17 @@ from pydantic import BaseModel, Field, ValidationError
 
 from anthropic import Anthropic, transform_schema
 
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    get_all,
+    upsert_rows,
+)
+from src.lookthrough.db.models import (
+    DimCompany,
+    DimTaxonomyNode,
+    FactExposureClassification,
+)
+
 
 # ----------------------------
 # Schema for structured output
@@ -71,7 +82,7 @@ def classify_one(
         "allowed_nodes": allowed_nodes,
     }
 
-    # Structured outputs: force JSON that matches our schema. :contentReference[oaicite:2]{index=2}
+    # Structured outputs: force JSON that matches our schema.
     response = client.messages.create(
         model=cfg.model,
         max_tokens=cfg.max_tokens,
@@ -128,7 +139,10 @@ def main() -> None:
         choices=["sector", "industry", "geography"],
         help="Taxonomy type to classify.",
     )
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
     args = parser.parse_args()
+
+    csv_mode = args.csv or _is_csv_mode()
 
     cfg = ClassifierConfig()
     root = _repo_root()
@@ -139,51 +153,96 @@ def main() -> None:
     prompt_path = root / "src" / "lookthrough" / "ai" / "prompts" / "company_classification.md"
     prompt_text = _read_text(prompt_path)
 
-    # Inputs
-    companies = _read_csv(silver / "dim_company.csv")
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    # -----------------------------------------------------------------------
+    # Load inputs
+    # -----------------------------------------------------------------------
+    if csv_mode:
+        companies = _read_csv(silver / "dim_company.csv")
+        taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    else:
+        companies = get_all(DimCompany)
+        taxonomy = get_all(DimTaxonomyNode)
 
-    # Build allowed node list
+        # In PostgreSQL mode, only classify companies that are missing the
+        # relevant taxonomy node ID — avoids re-classifying already-known companies.
+        if args.taxonomy_type == "industry":
+            unclassified_mask = (
+                companies["industry_taxonomy_node_id"].isna()
+                | (companies["industry_taxonomy_node_id"].astype(str) == "")
+            )
+        elif args.taxonomy_type == "geography":
+            unclassified_mask = (
+                companies["country_taxonomy_node_id"].isna()
+                | (companies["country_taxonomy_node_id"].astype(str) == "")
+            )
+        else:  # sector
+            unclassified_mask = (
+                companies["primary_sector"].isna()
+                | (companies["primary_sector"].astype(str).str.strip() == "")
+            )
+
+        companies = companies[unclassified_mask].copy()
+        print(f"Found {len(companies)} unclassified companies (taxonomy_type={args.taxonomy_type})")
+
+    # Build allowed node list for this taxonomy type
     tax = taxonomy[taxonomy["taxonomy_type"] == args.taxonomy_type].copy()
     allowed_nodes = sorted(tax["node_name"].astype(str).unique().tolist())
 
-    # Pick target companies to classify
-    # V1: classify first N companies (later: only Unknowns / only those appearing in exposures)
+    # Cap at limit
     companies = companies.head(args.limit).copy()
 
-    # Load existing classifications to avoid re-classifying
-    out_path = gold / "fact_exposure_classification.csv"
-    existing_df = None
+    # -----------------------------------------------------------------------
+    # Load existing classifications to skip already-classified companies
+    # -----------------------------------------------------------------------
     already_classified: set[tuple[str, str]] = set()
-    if out_path.exists():
-        existing_df = pd.read_csv(out_path)
-        # Build set of (company_id, taxonomy_type) pairs already classified
-        for _, row in existing_df.iterrows():
-            key = (str(row["company_id"]), str(row["taxonomy_type"]))
-            already_classified.add(key)
-        print(f"Loaded {len(existing_df)} existing classifications from {out_path}")
 
-    # Optional fields
-    country_col = "country" if "country" in companies.columns else None
+    if csv_mode:
+        out_path = gold / "fact_exposure_classification.csv"
+        existing_df: Optional[pd.DataFrame] = None
+        if out_path.exists():
+            existing_df = pd.read_csv(out_path)
+            for _, row in existing_df.iterrows():
+                already_classified.add((str(row["company_id"]), str(row["taxonomy_type"])))
+            print(f"Loaded {len(existing_df)} existing classifications from {out_path}")
+    else:
+        existing_classifications = get_all(FactExposureClassification)
+        if not existing_classifications.empty:
+            for _, row in existing_classifications.iterrows():
+                already_classified.add((str(row["company_id"]), str(row["taxonomy_type"])))
+            print(f"Loaded {len(existing_classifications)} existing classifications from PostgreSQL")
+        existing_df = None  # not used in DB mode
+
+    # Optional fields present in some tables
+    country_col = "primary_country" if "primary_country" in companies.columns else None
     desc_col = "company_description" if "company_description" in companies.columns else None
 
-    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))  # official SDK usage :contentReference[oaicite:3]{index=3}
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     run_id = str(uuid.uuid4())
     out_rows = []
     skipped = 0
 
+    # -----------------------------------------------------------------------
+    # Classification loop
+    # -----------------------------------------------------------------------
     for _, c in companies.iterrows():
         company_id = str(c["company_id"]) if "company_id" in companies.columns else None
-        company_name = str(c["company_name"]) if "company_name" in companies.columns else str(c.get("raw_company_name", ""))
+        company_name = (
+            str(c["company_name"]) if "company_name" in companies.columns
+            else str(c.get("raw_company_name", ""))
+        )
 
         # Skip if already classified for this taxonomy_type
         if (company_id, args.taxonomy_type) in already_classified:
             skipped += 1
             continue
 
-        company_country = str(c[country_col]) if country_col and pd.notna(c[country_col]) else None
-        company_desc = str(c[desc_col]) if desc_col and pd.notna(c[desc_col]) else None
+        company_country = (
+            str(c[country_col]) if country_col and pd.notna(c[country_col]) else None
+        )
+        company_desc = (
+            str(c[desc_col]) if desc_col and pd.notna(c[desc_col]) else None
+        )
 
         result = classify_one(
             client=client,
@@ -201,7 +260,11 @@ def main() -> None:
             taxonomy_node_id = "00000000-0000-0000-0000-000000000000"
         else:
             match = tax[tax["node_name"].astype(str) == result.node_name]
-            taxonomy_node_id = str(match.iloc[0]["taxonomy_node_id"]) if len(match) else "00000000-0000-0000-0000-000000000000"
+            taxonomy_node_id = (
+                str(match.iloc[0]["taxonomy_node_id"])
+                if len(match)
+                else "00000000-0000-0000-0000-000000000000"
+            )
 
         out_rows.append(
             {
@@ -221,20 +284,107 @@ def main() -> None:
 
     new_df = pd.DataFrame(out_rows)
 
-    # Combine with existing data if present
-    if existing_df is not None:
-        out_df = pd.concat([existing_df, new_df], ignore_index=True)
+    # -----------------------------------------------------------------------
+    # Write output
+    # -----------------------------------------------------------------------
+    if csv_mode:
+        # Combine with existing CSV data if present
+        if existing_df is not None:
+            out_df = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            out_df = new_df
+        out_df.to_csv(out_path, index=False)
+        print(f"Wrote: {out_path}")
     else:
-        out_df = new_df
+        # Write classification results to PostgreSQL
+        if out_rows:
+            upsert_rows(FactExposureClassification, out_rows, ["classification_id"])
+            print(f"Wrote {len(out_rows)} classifications to PostgreSQL:fact_exposure_classification")
+        else:
+            print("No new classifications to write.")
 
-    out_df.to_csv(out_path, index=False)
+        # Update dim_company with sector/industry/node_id from classification results.
+        # Only applies to industry-type classifications (those are the ones that fill
+        # industry_taxonomy_node_id + primary_sector + primary_industry on the company row).
+        if out_rows and args.taxonomy_type == "industry":
+            _update_dim_company_from_classifications(
+                out_rows=out_rows,
+                tax=tax,
+                taxonomy=taxonomy,
+            )
 
-    print("Wrote:", out_path)
-    print("Skipped (already classified):", skipped)
-    print("New rows:", len(new_df))
-    print("Total rows:", len(out_df))
-    print("run_id:", run_id)
-    print("model:", cfg.model)
+    print(f"Skipped (already classified): {skipped}")
+    print(f"New rows: {len(new_df)}")
+    print(f"run_id: {run_id}")
+    print(f"model: {cfg.model}")
+
+
+def _update_dim_company_from_classifications(
+    out_rows: list[dict],
+    tax: pd.DataFrame,
+    taxonomy: pd.DataFrame,
+) -> None:
+    """Update dim_company.primary_sector, primary_industry, and industry_taxonomy_node_id
+    for every company that received an industry classification this run.
+
+    Loads the full current dim_company records so that all other columns are preserved
+    through the upsert (upsert_rows updates every non-key column).
+    """
+    # Build lookup: company_id -> taxonomy_node_id for this run's results
+    classification_map: dict[str, str] = {}
+    for row in out_rows:
+        node_id = row["taxonomy_node_id"]
+        if node_id == "00000000-0000-0000-0000-000000000000":
+            continue  # unclassifiable — don't overwrite anything
+        classification_map[str(row["company_id"])] = node_id
+
+    if not classification_map:
+        print("No classifiable results to write back to dim_company.")
+        return
+
+    # Load full company records so we can do a complete upsert without losing other fields
+    all_companies = get_all(DimCompany)
+    if all_companies.empty:
+        return
+
+    # Build taxonomy lookup: node_id -> node row
+    tax_by_id = {str(row["taxonomy_node_id"]): row for _, row in taxonomy.iterrows()}
+
+    company_update_records = []
+
+    for _, company_row in all_companies.iterrows():
+        cid = str(company_row["company_id"])
+        if cid not in classification_map:
+            continue
+
+        node_id = classification_map[cid]
+        node = tax_by_id.get(node_id)
+        if node is None:
+            continue
+
+        # Resolve the parent sector node (level 1 parent of the industry node)
+        parent_id = node.get("parent_node_id")
+        sector_name: Optional[str] = None
+        if parent_id and not pd.isna(parent_id):
+            parent_node = tax_by_id.get(str(parent_id))
+            if parent_node is not None:
+                sector_name = str(parent_node["node_name"])
+
+        # Build a full record — start from the existing company row and patch the three fields
+        record = company_row.to_dict()
+        record["primary_sector"] = sector_name
+        record["primary_industry"] = str(node["node_name"])
+        record["industry_taxonomy_node_id"] = node_id
+        company_update_records.append(record)
+
+    if company_update_records:
+        upsert_rows(DimCompany, company_update_records, ["company_id"])
+        print(
+            f"Updated {len(company_update_records)} dim_company rows "
+            f"(primary_sector, primary_industry, industry_taxonomy_node_id)"
+        )
+    else:
+        print("No dim_company rows needed updating.")
 
 
 if __name__ == "__main__":

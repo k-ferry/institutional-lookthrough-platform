@@ -4,10 +4,16 @@ Map BDC reported_sector descriptions to GICS (Global Industry Classification Sta
 This module uses Claude to intelligently map free-text sector/industry descriptions
 from BDC filings to standardized GICS sub-industry codes.
 
+Supports both PostgreSQL and CSV modes:
+- Default: Read from PostgreSQL, write to PostgreSQL gics_mapping table,
+           and update dim_company.primary_sector / primary_industry
+- CSV mode: Read from CSV, write to data/gold/gics_mapping.csv (original behavior)
+
 Usage:
     python -m src.lookthrough.ai.map_to_gics
     python -m src.lookthrough.ai.map_to_gics --limit 50
     python -m src.lookthrough.ai.map_to_gics --batch-size 10
+    python -m src.lookthrough.ai.map_to_gics --csv
 """
 
 from __future__ import annotations
@@ -17,12 +23,23 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
 from anthropic import Anthropic, transform_schema
 
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    get_all,
+    upsert_rows,
+)
+from src.lookthrough.db.models import (
+    DimCompany,
+    FactReportedHolding,
+    GICSMapping,
+)
 from src.lookthrough.taxonomy.gics import get_sub_industry_lookup, get_gics_taxonomy
 
 
@@ -76,6 +93,29 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
+
+
+def _coerce_gics_codes_to_float(record: dict) -> dict:
+    """GICS codes are stored as Float in the DB model (10.0, 15.0, etc.).
+    The taxonomy module returns them as strings ('10', '15'). Convert here.
+    """
+    numeric_fields = [
+        "gics_sector_code",
+        "gics_industry_group_code",
+        "gics_industry_code",
+        "gics_sub_industry_code",
+    ]
+    out = dict(record)
+    for field in numeric_fields:
+        val = out.get(field)
+        if val is not None and str(val).strip() != "":
+            try:
+                out[field] = float(val)
+            except (ValueError, TypeError):
+                out[field] = None
+        else:
+            out[field] = None
+    return out
 
 
 def _build_gics_reference() -> str:
@@ -169,7 +209,14 @@ def map_batch(
         return [
             {
                 "reported_sector": desc,
-                "gics_sub_industry_code": "",
+                "gics_sector_code": None,
+                "gics_sector_name": None,
+                "gics_industry_group_code": None,
+                "gics_industry_group_name": None,
+                "gics_industry_code": None,
+                "gics_industry_name": None,
+                "gics_sub_industry_code": None,
+                "gics_sub_industry_name": None,
                 "confidence": 0.0,
                 "rationale": f"ValidationError: {str(e)[:200]}",
             }
@@ -186,17 +233,16 @@ def map_batch(
 
         # Validate code exists
         if code not in valid_codes:
-            # Try to find closest match or mark as invalid
             results.append({
                 "reported_sector": mapping.reported_sector,
-                "gics_sector_code": "",
-                "gics_sector_name": "",
-                "gics_industry_group_code": "",
-                "gics_industry_group_name": "",
-                "gics_industry_code": "",
-                "gics_industry_name": "",
+                "gics_sector_code": None,
+                "gics_sector_name": None,
+                "gics_industry_group_code": None,
+                "gics_industry_group_name": None,
+                "gics_industry_code": None,
+                "gics_industry_name": None,
                 "gics_sub_industry_code": code,
-                "gics_sub_industry_name": "",
+                "gics_sub_industry_name": None,
                 "confidence": 0.0,
                 "rationale": f"Invalid GICS code returned: {code}",
             })
@@ -212,6 +258,94 @@ def map_batch(
         })
 
     return results
+
+
+def _update_dim_company_from_gics(
+    gics_results: list[dict],
+    already_mapped_df: Optional[pd.DataFrame],
+) -> None:
+    """Update dim_company.primary_sector and primary_industry for BDC companies
+    whose reported_sector was just mapped (or was already mapped).
+
+    Strategy:
+    - For each company in dim_company where primary_sector IS NULL,
+      look up the company's reported_sector from their holdings,
+      then apply the GICS sector_name and industry_name.
+    - Does NOT overwrite industry_taxonomy_node_id — that belongs to
+      classify_companies.py which maps to the platform's taxonomy nodes.
+    """
+    # Build a lookup: reported_sector (lowercase) -> mapping dict
+    gics_lookup: dict[str, dict] = {}
+    for r in gics_results:
+        sec = r.get("reported_sector", "")
+        if sec:
+            gics_lookup[sec.lower()] = r
+
+    # Also include anything already in the DB (passed in as a DataFrame)
+    if already_mapped_df is not None and not already_mapped_df.empty:
+        for _, row in already_mapped_df.iterrows():
+            sec = str(row.get("reported_sector", ""))
+            if sec and sec.lower() not in gics_lookup:
+                gics_lookup[sec.lower()] = row.to_dict()
+
+    if not gics_lookup:
+        return
+
+    # Load holdings to build: company_id -> reported_sector
+    all_holdings = get_all(FactReportedHolding)
+    if all_holdings.empty:
+        return
+
+    company_sector_map: dict[str, str] = {}
+    for _, h in all_holdings.iterrows():
+        cid = h.get("company_id")
+        sec = h.get("reported_sector")
+        if cid and not pd.isna(cid) and sec and not pd.isna(sec):
+            cleaned = str(sec).strip()
+            if cleaned:
+                company_sector_map[str(cid)] = cleaned
+
+    # Load full company records — we need all columns for upsert
+    all_companies = get_all(DimCompany)
+    if all_companies.empty:
+        return
+
+    company_update_records = []
+    for _, company in all_companies.iterrows():
+        # Only update companies that have no primary_sector yet
+        if pd.notna(company.get("primary_sector")) and str(company.get("primary_sector", "")).strip():
+            continue
+
+        cid = str(company["company_id"])
+        reported_sec = company_sector_map.get(cid)
+        if not reported_sec:
+            continue
+
+        mapping = gics_lookup.get(reported_sec.lower())
+        if not mapping:
+            continue
+
+        gics_sector = mapping.get("gics_sector_name")
+        gics_industry = mapping.get("gics_industry_name")
+
+        if not gics_sector:
+            continue  # Invalid/unresolved mapping — skip
+
+        # Build the full record, preserving all existing fields
+        record = company.to_dict()
+        record["primary_sector"] = gics_sector
+        record["primary_industry"] = gics_industry
+        # Leave industry_taxonomy_node_id unchanged — classify_companies.py owns that field
+        company_update_records.append(record)
+
+    if company_update_records:
+        upsert_rows(DimCompany, company_update_records, ["company_id"])
+        print(
+            f"Updated {len(company_update_records)} dim_company rows "
+            f"(primary_sector, primary_industry) from GICS mapping"
+        )
+    else:
+        print("No dim_company rows needed updating from GICS mapping.")
 
 
 def main() -> None:
@@ -230,7 +364,10 @@ def main() -> None:
         default=20,
         help="Number of descriptions per API call (default: 20)",
     )
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
     args = parser.parse_args()
+
+    csv_mode = args.csv or _is_csv_mode()
 
     cfg = MapperConfig(batch_size=args.batch_size)
     root = _repo_root()
@@ -238,11 +375,17 @@ def main() -> None:
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    # Load holdings to get unique reported_sector values
-    holdings_path = silver / "fact_reported_holding.csv"
-    holdings = _read_csv(holdings_path)
+    print(f"Data mode: {'CSV' if csv_mode else 'PostgreSQL'}")
 
-    # Get unique non-null descriptions
+    # -----------------------------------------------------------------------
+    # Load unique reported_sector values
+    # -----------------------------------------------------------------------
+    if csv_mode:
+        holdings_path = silver / "fact_reported_holding.csv"
+        holdings = _read_csv(holdings_path)
+    else:
+        holdings = get_all(FactReportedHolding)
+
     unique_sectors = (
         holdings["reported_sector"]
         .dropna()
@@ -251,19 +394,28 @@ def main() -> None:
         .unique()
         .tolist()
     )
-    # Filter out empty strings
+    # Filter out empty strings and literal "nan"
     unique_sectors = [s for s in unique_sectors if s and s.lower() != "nan"]
     print(f"Found {len(unique_sectors)} unique reported_sector values")
 
+    # -----------------------------------------------------------------------
     # Load existing mappings to skip already-mapped descriptions
-    out_path = gold / "gics_mapping.csv"
+    # -----------------------------------------------------------------------
     already_mapped: set[str] = set()
-    existing_df = None
+    existing_df: Optional[pd.DataFrame] = None
 
-    if out_path.exists():
-        existing_df = pd.read_csv(out_path)
-        already_mapped = set(existing_df["reported_sector"].astype(str).tolist())
-        print(f"Loaded {len(existing_df)} existing mappings from {out_path}")
+    if csv_mode:
+        out_path = gold / "gics_mapping.csv"
+        if out_path.exists():
+            existing_df = pd.read_csv(out_path)
+            already_mapped = set(existing_df["reported_sector"].astype(str).tolist())
+            print(f"Loaded {len(existing_df)} existing mappings from {out_path}")
+    else:
+        existing_db = get_all(GICSMapping)
+        if not existing_db.empty:
+            existing_df = existing_db
+            already_mapped = set(existing_db["reported_sector"].astype(str).tolist())
+            print(f"Loaded {len(existing_db)} existing mappings from PostgreSQL")
 
     # Filter to only unmapped descriptions
     to_map = [s for s in unique_sectors if s not in already_mapped]
@@ -275,16 +427,22 @@ def main() -> None:
 
     if not to_map:
         print("No new descriptions to map.")
+        # Still attempt to update dim_company from existing mappings
+        if not csv_mode and existing_df is not None:
+            print("Applying existing GICS mappings to dim_company...")
+            _update_dim_company_from_gics([], existing_df)
         return
 
+    # -----------------------------------------------------------------------
     # Build GICS reference and valid codes set
+    # -----------------------------------------------------------------------
     gics_reference = _build_gics_reference()
     taxonomy = get_gics_taxonomy()
     valid_codes = {n["code"] for n in taxonomy if n["level"] == "sub_industry"}
 
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-    all_results = []
+    all_results: list[dict] = []
     total_batches = (len(to_map) + cfg.batch_size - 1) // cfg.batch_size
 
     for i in range(0, len(to_map), cfg.batch_size):
@@ -295,48 +453,59 @@ def main() -> None:
         results = map_batch(client, cfg, batch, gics_reference, valid_codes)
         all_results.extend(results)
 
-    # Create output DataFrame
     new_df = pd.DataFrame(all_results)
 
-    # Combine with existing data if present
-    if existing_df is not None:
-        # Ensure column order matches
+    # -----------------------------------------------------------------------
+    # Write output
+    # -----------------------------------------------------------------------
+    if csv_mode:
+        # Normalise column order
         cols = [
             "reported_sector",
-            "gics_sector_code",
-            "gics_sector_name",
-            "gics_industry_group_code",
-            "gics_industry_group_name",
-            "gics_industry_code",
-            "gics_industry_name",
-            "gics_sub_industry_code",
-            "gics_sub_industry_name",
-            "confidence",
-            "rationale",
+            "gics_sector_code", "gics_sector_name",
+            "gics_industry_group_code", "gics_industry_group_name",
+            "gics_industry_code", "gics_industry_name",
+            "gics_sub_industry_code", "gics_sub_industry_name",
+            "confidence", "rationale",
         ]
-        for col in cols:
-            if col not in existing_df.columns:
-                existing_df[col] = ""
-        existing_df = existing_df[cols]
-        new_df = new_df[cols]
-        out_df = pd.concat([existing_df, new_df], ignore_index=True)
-    else:
-        out_df = new_df
+        if existing_df is not None:
+            for col in cols:
+                if col not in existing_df.columns:
+                    existing_df[col] = ""
+            existing_df = existing_df[cols]
+            new_df = new_df[cols]
+            out_df = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            out_df = new_df[cols]
 
-    out_df.to_csv(out_path, index=False)
+        out_df.to_csv(out_path, index=False)
+        print(f"\nWrote: {out_path}")
+    else:
+        # Convert GICS code strings to floats to match the DB model (Float columns)
+        db_records = [_coerce_gics_codes_to_float(r) for r in all_results]
+
+        if db_records:
+            upsert_rows(GICSMapping, db_records, ["reported_sector"])
+            print(f"\nWrote {len(db_records)} mappings to PostgreSQL:gics_mapping")
+
+        # Update dim_company.primary_sector / primary_industry for BDC companies
+        print("Updating dim_company from GICS mappings...")
+        _update_dim_company_from_gics(all_results, existing_df)
 
     # Print summary
-    print(f"\nWrote: {out_path}")
     print(f"New mappings: {len(new_df)}")
-    print(f"Total mappings: {len(out_df)}")
     print(f"Model: {cfg.model}")
 
     # Show sample of new mappings
-    if len(new_df) > 0:
+    if len(new_df) > 0 and "gics_sub_industry_name" in new_df.columns:
         print("\nSample mappings:")
         sample = new_df.head(5)
         for _, row in sample.iterrows():
-            print(f"  '{row['reported_sector'][:50]}...' -> {row['gics_sub_industry_code']} ({row['gics_sub_industry_name']}) [{row['confidence']:.2f}]")
+            sector_label = str(row.get("reported_sector", ""))[:50]
+            sub_name = str(row.get("gics_sub_industry_name", ""))
+            sub_code = str(row.get("gics_sub_industry_code", ""))
+            conf = float(row.get("confidence", 0.0))
+            print(f"  '{sector_label}' -> {sub_code} ({sub_name}) [{conf:.2f}]")
 
 
 if __name__ == "__main__":
