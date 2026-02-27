@@ -8,16 +8,44 @@ import {
   Bot,
   Settings,
   LogOut,
+  ClipboardList,
+  ScrollText,
+  Activity,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
-const navItems = [
+const frontOfficeItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/holdings', label: 'Holdings', icon: Briefcase },
   { to: '/funds', label: 'Funds', icon: Building2 },
   { to: '/agent', label: 'AI Assistant', icon: Bot },
-  { to: '/settings', label: 'Settings', icon: Settings },
 ]
+
+const opsItems = [
+  { to: '/ops/review-queue', label: 'Review Queue', icon: ClipboardList },
+  { to: '/ops/audit-trail', label: 'Audit Trail', icon: ScrollText },
+  { to: '/ops/pipeline', label: 'Pipeline Monitor', icon: Activity },
+]
+
+function NavSection({ items }) {
+  return items.map(({ to, label, icon: Icon }) => (
+    <NavLink
+      key={to}
+      to={to}
+      className={({ isActive }) =>
+        cn(
+          'flex items-center gap-3 px-4 py-2.5 rounded-md text-sm font-medium transition-colors',
+          isActive
+            ? 'bg-primary-700 text-white'
+            : 'text-primary-100 hover:bg-primary-500 hover:text-white'
+        )
+      }
+    >
+      <Icon className="h-5 w-5 shrink-0" />
+      {label}
+    </NavLink>
+  ))
+}
 
 export default function AppLayout() {
   const { user, logout } = useAuth()
@@ -30,24 +58,21 @@ export default function AppLayout() {
           <p className="text-xs text-primary-200 mt-1">Portfolio Transparency</p>
         </div>
 
-        <nav className="flex-1 p-4 space-y-1">
-          {navItems.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 px-4 py-2.5 rounded-md text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-primary-700 text-white'
-                    : 'text-primary-100 hover:bg-primary-500 hover:text-white'
-                )
-              }
-            >
-              <Icon className="h-5 w-5" />
-              {label}
-            </NavLink>
-          ))}
+        <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+          {/* Front Office section */}
+          <p className="px-4 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-primary-300">
+            Front Office
+          </p>
+          <NavSection items={frontOfficeItems} />
+
+          {/* Divider */}
+          <div className="my-3 border-t border-primary-500" />
+
+          {/* Ops section */}
+          <p className="px-4 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-widest text-primary-300">
+            Ops
+          </p>
+          <NavSection items={opsItems} />
         </nav>
 
         <div className="p-4 border-t border-primary-500">
@@ -55,8 +80,8 @@ export default function AppLayout() {
         </div>
       </aside>
 
-      <div className="flex-1 flex flex-col">
-        <header className="h-16 bg-white border-b border-secondary-200 flex items-center justify-between px-6">
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="h-16 bg-white border-b border-secondary-200 flex items-center justify-between px-6 shrink-0">
           <div>
             <h2 className="text-sm font-medium text-secondary-600">
               Institutional Analytics

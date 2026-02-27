@@ -1,6 +1,6 @@
 """Review queue API endpoints for approving, rejecting, and dismissing flagged items."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,7 +9,13 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from src.lookthrough.auth.dependencies import get_current_user, get_db
-from src.lookthrough.db.models import DimCompany, FactReviewQueueItem, User
+from src.lookthrough.db.models import (
+    DimCompany,
+    FactAuditEvent,
+    FactReportedHolding,
+    FactReviewQueueItem,
+    User,
+)
 
 router = APIRouter(prefix="/api/review-queue", tags=["review-queue"])
 
@@ -296,3 +302,136 @@ def update_queue_item(
         company.company_name if company else None,
         company.primary_sector if company else None,
     )
+
+
+# ===========================================================================
+# Audit Trail router  —  GET /api/audit-trail
+# ===========================================================================
+
+audit_router = APIRouter(prefix="/api", tags=["audit-trail"])
+
+
+@audit_router.get("/audit-trail")
+def list_audit_events(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
+    action: Optional[str] = Query(default=None),
+    entity_type: Optional[str] = Query(default=None),
+    days: Optional[int] = Query(default=None),
+    entity_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Paginated audit trail with optional filters.
+
+    days: integer cutoff (e.g. 1=today, 7=last week, 30=last month, None=all)
+    """
+    q = db.query(FactAuditEvent)
+
+    if action:
+        q = q.filter(FactAuditEvent.action == action)
+    if entity_type:
+        q = q.filter(FactAuditEvent.entity_type == entity_type)
+    if entity_id:
+        q = q.filter(FactAuditEvent.entity_id.ilike(f"%{entity_id}%"))
+    if days is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        q = q.filter(FactAuditEvent.event_time >= cutoff)
+
+    total = q.count()
+    rows = (
+        q.order_by(FactAuditEvent.event_time.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = [
+        {
+            "audit_event_id": r.audit_event_id,
+            "run_id": r.run_id,
+            "event_time": r.event_time,
+            "actor_type": r.actor_type,
+            "actor_id": r.actor_id,
+            "action": r.action,
+            "entity_type": r.entity_type,
+            "entity_id": r.entity_id,
+            "payload_json": r.payload_json,
+        }
+        for r in rows
+    ]
+    return {"items": items, "total": total}
+
+
+# ===========================================================================
+# Pipeline stats router  —  GET /api/pipeline/stats
+# ===========================================================================
+
+pipeline_router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
+
+
+@pipeline_router.get("/stats")
+def get_pipeline_stats(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Data quality and coverage metrics for the Pipeline Monitor page."""
+    total_companies = db.query(func.count(DimCompany.company_id)).scalar() or 0
+    classified = (
+        db.query(func.count(DimCompany.company_id))
+        .filter(DimCompany.primary_sector.isnot(None))
+        .scalar() or 0
+    )
+
+    total_holdings = (
+        db.query(func.count(FactReportedHolding.reported_holding_id)).scalar() or 0
+    )
+    resolved_holdings = (
+        db.query(func.count(FactReportedHolding.reported_holding_id))
+        .filter(FactReportedHolding.company_id.isnot(None))
+        .scalar() or 0
+    )
+    holdings_with_value = (
+        db.query(func.count(FactReportedHolding.reported_holding_id))
+        .filter(FactReportedHolding.reported_value_usd.isnot(None))
+        .scalar() or 0
+    )
+    synthetic_holdings = (
+        db.query(func.count(FactReportedHolding.reported_holding_id))
+        .filter(FactReportedHolding.source == "synthetic")
+        .scalar() or 0
+    )
+    bdc_holdings = total_holdings - synthetic_holdings
+
+    recent_run_rows = (
+        db.query(FactAuditEvent)
+        .filter(FactAuditEvent.action == "pipeline_run_complete")
+        .order_by(FactAuditEvent.event_time.desc())
+        .limit(5)
+        .all()
+    )
+    recent_runs = [
+        {
+            "audit_event_id": r.audit_event_id,
+            "run_id": r.run_id,
+            "event_time": r.event_time,
+            "payload_json": r.payload_json,
+        }
+        for r in recent_run_rows
+    ]
+
+    def pct(num: int, denom: int) -> float:
+        return round(num / denom * 100, 1) if denom else 0.0
+
+    return {
+        "total_companies": total_companies,
+        "classified_companies": classified,
+        "unclassified_companies": total_companies - classified,
+        "classification_coverage": pct(classified, total_companies),
+        "total_holdings": total_holdings,
+        "entity_resolution_rate": pct(resolved_holdings, total_holdings),
+        "holdings_with_value_pct": pct(holdings_with_value, total_holdings),
+        "bdc_holdings": bdc_holdings,
+        "synthetic_holdings": synthetic_holdings,
+        "recent_runs": recent_runs,
+    }

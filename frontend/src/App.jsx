@@ -6,6 +6,9 @@ import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import HoldingsPage from './pages/HoldingsPage'
 import AgentPage from './pages/AgentPage'
+import ReviewQueuePage from './pages/ops/ReviewQueuePage'
+import AuditTrailPage from './pages/ops/AuditTrailPage'
+import PipelineMonitorPage from './pages/ops/PipelineMonitorPage'
 import NotFound from './pages/NotFound'
 
 const queryClient = new QueryClient({
@@ -55,6 +58,9 @@ function AppRoutes() {
         <Route path="/funds" element={<DashboardPage />} />
         <Route path="/agent" element={<AgentPage />} />
         <Route path="/settings" element={<DashboardPage />} />
+        <Route path="/ops/review-queue" element={<ReviewQueuePage />} />
+        <Route path="/ops/audit-trail" element={<AuditTrailPage />} />
+        <Route path="/ops/pipeline" element={<PipelineMonitorPage />} />
       </Route>
       <Route path="*" element={<NotFound />} />
     </Routes>
