@@ -247,6 +247,9 @@ class FactReviewQueueItem(Base):
     priority: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(50))
     created_at: Mapped[str] = mapped_column(String(50))
+    reviewer_notes: Mapped[str] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[str] = mapped_column(String(50), nullable=True)
+    resolved_by: Mapped[str] = mapped_column(String(255), nullable=True)
 
 
 class FactAuditEvent(Base):
