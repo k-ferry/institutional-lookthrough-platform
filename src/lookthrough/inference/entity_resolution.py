@@ -9,14 +9,32 @@ Resolution strategies (applied in order):
 3. Normalized match (stripped suffixes/punctuation) - confidence 0.90
 4. Token overlap match (Jaccard similarity >= 0.70) - confidence 0.80
 5. First entity match (first company in multi-company names) - confidence 0.75
+
+Supports both PostgreSQL and CSV modes:
+- Default: Read/write from PostgreSQL database
+- CSV mode: Set CSV_MODE=1 or use --csv flag for backward compatibility
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    dataframe_to_records,
+    get_all,
+    upsert_rows,
+)
+from src.lookthrough.db.models import (
+    DimCompany,
+    DimEntityAlias,
+    EntityResolutionLog,
+    FactReportedHolding,
+)
 
 
 # Common company suffixes to strip during normalization
@@ -152,7 +170,7 @@ def _extract_first_entity(name: str) -> str:
     return text
 
 
-def resolve_entities(verbose: bool = False) -> pd.DataFrame:
+def resolve_entities(verbose: bool = False, csv_mode: bool = False) -> pd.DataFrame:
     """
     Resolve raw company names to canonical company_id.
 
@@ -165,6 +183,7 @@ def resolve_entities(verbose: bool = False) -> pd.DataFrame:
 
     Args:
         verbose: If True, print examples of matches found by each method
+        csv_mode: If True, use CSV files instead of database
 
     Returns:
         Updated holdings DataFrame
@@ -174,10 +193,15 @@ def resolve_entities(verbose: bool = False) -> pd.DataFrame:
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    # Load required data
-    holdings = _read_csv(silver / "fact_reported_holding.csv")
-    companies = _read_csv(silver / "dim_company.csv")
-    aliases = _read_csv(silver / "dim_entity_alias.csv")
+    # Load required data from DB or CSV
+    if csv_mode:
+        holdings = _read_csv(silver / "fact_reported_holding.csv")
+        companies = _read_csv(silver / "dim_company.csv")
+        aliases = _read_csv(silver / "dim_entity_alias.csv")
+    else:
+        holdings = get_all(FactReportedHolding)
+        companies = get_all(DimCompany)
+        aliases = get_all(DimEntityAlias)
 
     # Build lookup dictionaries (case-insensitive)
     # Direct company name -> company_id
@@ -324,14 +348,29 @@ def resolve_entities(verbose: bool = False) -> pd.DataFrame:
             "match_confidence": match_confidence,
         })
 
-    # Write updated holdings back to silver
-    holdings_path = silver / "fact_reported_holding.csv"
-    holdings.to_csv(holdings_path, index=False)
-
-    # Write resolution log to gold
+    # Write updated holdings and resolution log
     resolution_log_df = pd.DataFrame(resolution_log)
-    log_path = gold / "entity_resolution_log.csv"
-    resolution_log_df.to_csv(log_path, index=False)
+
+    if csv_mode:
+        holdings_path = silver / "fact_reported_holding.csv"
+        holdings.to_csv(holdings_path, index=False)
+        log_path = gold / "entity_resolution_log.csv"
+        resolution_log_df.to_csv(log_path, index=False)
+    else:
+        # Write to database
+        upsert_rows(
+            FactReportedHolding,
+            dataframe_to_records(holdings),
+            ["reported_holding_id"],
+        )
+        if not resolution_log_df.empty:
+            upsert_rows(
+                EntityResolutionLog,
+                dataframe_to_records(resolution_log_df),
+                ["reported_holding_id"],
+            )
+        holdings_path = "PostgreSQL:fact_reported_holding"
+        log_path = "PostgreSQL:entity_resolution_log"
 
     # Calculate totals
     total_processed = (resolved_direct + resolved_alias + resolved_normalized +
@@ -560,7 +599,7 @@ def _pick_canonical_name(names: list[str]) -> tuple[str, int]:
     return scored[0][2], scored[0][1]
 
 
-def consolidate_company_duplicates_safe() -> dict:
+def consolidate_company_duplicates_safe(csv_mode: bool = False) -> dict:
     """
     Safely consolidate duplicate companies using conservative matching rules.
 
@@ -573,9 +612,12 @@ def consolidate_company_duplicates_safe() -> dict:
     For each consolidation:
     - Pick shortest clean name as canonical
     - Update holdings to point to canonical company_id
-    - Add duplicate names to dim_entity_alias.csv
+    - Add duplicate names to dim_entity_alias
     - Log to entity_resolution_log with action "company_consolidation"
     - Do NOT delete duplicate dim_company rows (preserve audit trail)
+
+    Args:
+        csv_mode: If True, use CSV files instead of database
 
     Returns:
         Dict with statistics about consolidation.
@@ -587,15 +629,21 @@ def consolidate_company_duplicates_safe() -> dict:
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    companies = _read_csv(silver / "dim_company.csv")
-    holdings = _read_csv(silver / "fact_reported_holding.csv")
-
-    # Load existing aliases
-    alias_path = silver / "dim_entity_alias.csv"
-    if alias_path.exists():
-        aliases = _read_csv(alias_path)
+    # Load data from DB or CSV
+    if csv_mode:
+        companies = _read_csv(silver / "dim_company.csv")
+        holdings = _read_csv(silver / "fact_reported_holding.csv")
+        alias_path = silver / "dim_entity_alias.csv"
+        if alias_path.exists():
+            aliases = _read_csv(alias_path)
+        else:
+            aliases = pd.DataFrame(columns=["alias_id", "entity_type", "entity_id", "alias_text"])
     else:
-        aliases = pd.DataFrame(columns=["alias_id", "entity_type", "entity_id", "alias_text"])
+        companies = get_all(DimCompany)
+        holdings = get_all(FactReportedHolding)
+        aliases = get_all(DimEntityAlias)
+        if aliases.empty:
+            aliases = pd.DataFrame(columns=["alias_id", "entity_type", "entity_id", "alias_text"])
 
     # Build lookups
     company_id_to_name: dict[str, str] = {}
@@ -788,16 +836,7 @@ def consolidate_company_duplicates_safe() -> dict:
                 })
                 existing_aliases.add(dup_name.lower())
 
-    # Write updated holdings
-    holdings.to_csv(silver / "fact_reported_holding.csv", index=False)
-
-    # Write updated aliases
-    if new_aliases:
-        new_aliases_df = pd.DataFrame(new_aliases)
-        aliases = pd.concat([aliases, new_aliases_df], ignore_index=True)
-        aliases.to_csv(alias_path, index=False)
-
-    # Write consolidation log
+    # Build consolidation log entries
     log_entries = []
     timestamp = datetime.datetime.now().isoformat()
     for canonical_id, duplicate_ids, method, reason in consolidation_groups:
@@ -805,6 +844,7 @@ def consolidate_company_duplicates_safe() -> dict:
         for dup_id in duplicate_ids:
             dup_name = company_id_to_name[dup_id]
             log_entries.append({
+                "reported_holding_id": f"consolidation_{dup_id}",  # Use as pseudo-ID for consolidation logs
                 "timestamp": timestamp,
                 "action": "company_consolidation",
                 "canonical_company_id": canonical_id,
@@ -815,13 +855,41 @@ def consolidate_company_duplicates_safe() -> dict:
                 "reason": reason,
             })
 
-    if log_entries:
-        log_df = pd.DataFrame(log_entries)
-        log_path = gold / "entity_resolution_log.csv"
-        if log_path.exists():
-            existing_log = pd.read_csv(log_path)
-            log_df = pd.concat([existing_log, log_df], ignore_index=True)
-        log_df.to_csv(log_path, index=False)
+    # Write data
+    if csv_mode:
+        holdings.to_csv(silver / "fact_reported_holding.csv", index=False)
+        if new_aliases:
+            new_aliases_df = pd.DataFrame(new_aliases)
+            aliases = pd.concat([aliases, new_aliases_df], ignore_index=True)
+            aliases.to_csv(silver / "dim_entity_alias.csv", index=False)
+        if log_entries:
+            log_df = pd.DataFrame(log_entries)
+            log_path = gold / "entity_resolution_log.csv"
+            if log_path.exists():
+                existing_log = pd.read_csv(log_path)
+                log_df = pd.concat([existing_log, log_df], ignore_index=True)
+            log_df.to_csv(log_path, index=False)
+    else:
+        # Write to database
+        upsert_rows(
+            FactReportedHolding,
+            dataframe_to_records(holdings),
+            ["reported_holding_id"],
+        )
+        if new_aliases:
+            new_aliases_df = pd.DataFrame(new_aliases)
+            upsert_rows(
+                DimEntityAlias,
+                dataframe_to_records(new_aliases_df),
+                ["alias_id"],
+            )
+        if log_entries:
+            log_df = pd.DataFrame(log_entries)
+            upsert_rows(
+                EntityResolutionLog,
+                dataframe_to_records(log_df),
+                ["reported_holding_id"],
+            )
 
     # ============================================================
     # PRINT SUMMARY
@@ -878,10 +946,15 @@ def consolidate_company_duplicates_safe() -> dict:
         print(f"\n... and {len(consolidation_groups) - 15} more groups")
 
     print("\n" + "=" * 70)
-    print("FILES UPDATED:")
-    print(f"  - {silver / 'fact_reported_holding.csv'}")
-    print(f"  - {silver / 'dim_entity_alias.csv'}")
-    print(f"  - {gold / 'entity_resolution_log.csv'}")
+    print("DATA UPDATED:")
+    if csv_mode:
+        print(f"  - {silver / 'fact_reported_holding.csv'}")
+        print(f"  - {silver / 'dim_entity_alias.csv'}")
+        print(f"  - {gold / 'entity_resolution_log.csv'}")
+    else:
+        print("  - PostgreSQL:fact_reported_holding")
+        print("  - PostgreSQL:dim_entity_alias")
+        print("  - PostgreSQL:entity_resolution_log")
     print("=" * 70)
 
     return {
@@ -1206,19 +1279,32 @@ def run_full_analysis() -> None:
 
 
 def main() -> None:
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--analyze":
+    import argparse
+    parser = argparse.ArgumentParser(description="Entity Resolution")
+    parser.add_argument("--analyze", action="store_true", help="Analyze potential matches")
+    parser.add_argument("--duplicates", action="store_true", help="Find duplicate companies")
+    parser.add_argument("--consolidate", action="store_true", help="Consolidate duplicates safely")
+    parser.add_argument("--consolidate-unsafe", action="store_true", help="Consolidate duplicates (unsafe)")
+    parser.add_argument("--full", action="store_true", help="Run full analysis")
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+    print(f"Data mode: {'CSV' if csv_mode else 'PostgreSQL'}")
+
+    if args.analyze:
         analyze_potential_matches()
-    elif len(sys.argv) > 1 and sys.argv[1] == "--duplicates":
+    elif args.duplicates:
         find_company_duplicates()
-    elif len(sys.argv) > 1 and sys.argv[1] == "--consolidate":
-        consolidate_company_duplicates_safe()
-    elif len(sys.argv) > 1 and sys.argv[1] == "--consolidate-unsafe":
+    elif args.consolidate:
+        consolidate_company_duplicates_safe(csv_mode=csv_mode)
+    elif args.consolidate_unsafe:
         consolidate_company_duplicates(dry_run=False)
-    elif len(sys.argv) > 1 and sys.argv[1] == "--full":
+    elif args.full:
         run_full_analysis()
     else:
-        resolve_entities(verbose=True)
+        resolve_entities(verbose=True, csv_mode=csv_mode)
 
 
 if __name__ == "__main__":

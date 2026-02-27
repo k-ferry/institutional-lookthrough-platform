@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -7,6 +9,21 @@ import uuid
 
 import numpy as np
 import pandas as pd
+
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    bulk_insert,
+    dataframe_to_records,
+    delete_all,
+    get_all,
+    get_filtered,
+)
+from src.lookthrough.db.models import (
+    DimPortfolio,
+    FactFundReport,
+    FactInferredExposure,
+    FactReportedHolding,
+)
 
 
 @dataclass(frozen=True)
@@ -90,16 +107,21 @@ def _estimate_fund_nav(
     return float(nav_estimate), float(covered_value_usd)
 
 
-def infer_exposures_v1(cfg: InferenceConfig) -> pd.DataFrame:
+def infer_exposures_v1(cfg: InferenceConfig, csv_mode: bool = False) -> pd.DataFrame:
     root = _repo_root()
     silver = root / "data" / "silver"
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    # Required inputs
-    portfolio = _read_csv(silver / "dim_portfolio.csv")
-    fund_reports = _read_csv(silver / "fact_fund_report.csv")
-    holdings = _read_csv(silver / "fact_reported_holding.csv")
+    # Load required inputs from DB or CSV
+    if csv_mode:
+        portfolio = _read_csv(silver / "dim_portfolio.csv")
+        fund_reports = _read_csv(silver / "fact_fund_report.csv")
+        holdings = _read_csv(silver / "fact_reported_holding.csv")
+    else:
+        portfolio = get_all(DimPortfolio)
+        fund_reports = get_all(FactFundReport)
+        holdings = get_all(FactReportedHolding)
 
     # Minimal required columns checks (fail fast)
     for col in ["portfolio_id"]:
@@ -227,10 +249,16 @@ def infer_exposures_v1(cfg: InferenceConfig) -> pd.DataFrame:
     exposures_df = pd.DataFrame(exposures_out)
 
     # Write output
-    out_path = gold / "fact_inferred_exposure.csv"
-    exposures_df.to_csv(out_path, index=False)
+    if csv_mode:
+        out_path = gold / "fact_inferred_exposure.csv"
+        exposures_df.to_csv(out_path, index=False)
+        print("Wrote:", out_path)
+    else:
+        # Clear existing exposures for this run and insert new ones
+        delete_all(FactInferredExposure)
+        bulk_insert(FactInferredExposure, dataframe_to_records(exposures_df))
+        print("Wrote: PostgreSQL:fact_inferred_exposure")
 
-    print("Wrote:", out_path)
     print("Rows:", len(exposures_df))
     print("run_id:", run_id)
 
@@ -238,8 +266,16 @@ def infer_exposures_v1(cfg: InferenceConfig) -> pd.DataFrame:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Infer exposures")
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+    print(f"Data mode: {'CSV' if csv_mode else 'PostgreSQL'}")
+
     cfg = InferenceConfig()
-    infer_exposures_v1(cfg)
+    infer_exposures_v1(cfg, csv_mode=csv_mode)
 
 
 if __name__ == "__main__":

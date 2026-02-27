@@ -1,15 +1,34 @@
-"""Agent tool functions that query Gold tables and return structured results.
+"""Agent tool functions that query Gold/Silver tables and return structured results.
 
 These tools are designed to be called by an AI agent via tool-calling. Each function
-reads CSVs from data/gold/ and data/silver/, runs a pandas query, and returns a
-dictionary with the results.
+reads from PostgreSQL (default) or CSVs (if CSV_MODE=1), runs a pandas query, and
+returns a dictionary with the results.
+
+Supports both PostgreSQL and CSV modes:
+- Default: Read from PostgreSQL database
+- CSV mode: Set CSV_MODE=1 for backward compatibility
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+from src.lookthrough.db.repository import _is_csv_mode, get_all
+from src.lookthrough.db.models import (
+    DimCompany,
+    DimFund,
+    DimTaxonomyNode,
+    FactAggregationSnapshot,
+    FactExposureClassification,
+    FactFundReport,
+    FactInferredExposure,
+    FactReportedHolding,
+    FactReviewQueueItem,
+    GICSMapping,
+)
 
 # Stable placeholder for unknown/missing taxonomy classification
 UNKNOWN_TAXONOMY_NODE_ID = "00000000-0000-0000-0000-000000000000"
@@ -28,6 +47,36 @@ def _read_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     return pd.read_csv(path)
+
+
+# Model mapping for reading from database
+_MODEL_MAP = {
+    "dim_company.csv": DimCompany,
+    "dim_fund.csv": DimFund,
+    "dim_taxonomy_node.csv": DimTaxonomyNode,
+    "fact_fund_report.csv": FactFundReport,
+    "fact_reported_holding.csv": FactReportedHolding,
+    "fact_inferred_exposure.csv": FactInferredExposure,
+    "fact_aggregation_snapshot.csv": FactAggregationSnapshot,
+    "fact_exposure_classification.csv": FactExposureClassification,
+    "fact_review_queue_item.csv": FactReviewQueueItem,
+    "gics_mapping.csv": GICSMapping,
+}
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    """Read table from database or CSV based on mode."""
+    if _is_csv_mode():
+        return _read_csv(path)
+
+    # Try to find the model for this path
+    filename = path.name
+    model = _MODEL_MAP.get(filename)
+    if model:
+        return get_all(model)
+
+    # Fall back to CSV for unmapped files
+    return _read_csv(path)
 
 
 def _build_taxonomy_lookup(taxonomy_df: pd.DataFrame) -> dict:
@@ -149,10 +198,10 @@ def _get_fund_holdings_with_gics(
     silver = root / "data" / "silver"
 
     # Load required data
-    holdings = _read_csv(silver / "fact_reported_holding.csv")
-    fund_reports = _read_csv(silver / "fact_fund_report.csv")
-    funds = _read_csv(silver / "dim_fund.csv")
-    gics_mapping = _read_csv(gold / "gics_mapping.csv")
+    holdings = _read_table(silver / "fact_reported_holding.csv")
+    fund_reports = _read_table(silver / "fact_fund_report.csv")
+    funds = _read_table(silver / "dim_fund.csv")
+    gics_mapping = _read_table(gold / "gics_mapping.csv")
 
     if holdings.empty:
         return pd.DataFrame(), as_of_date or "", ""
@@ -236,7 +285,7 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
     taxonomy_lookup = _build_taxonomy_lookup(taxonomy)
 
     # If fund_name filter provided, use GICS mapping on reported holdings
@@ -285,7 +334,7 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
         }
 
     # No fund filter - use pre-aggregated data
-    agg = _read_csv(gold / "fact_aggregation_snapshot.csv")
+    agg = _read_table(gold / "fact_aggregation_snapshot.csv")
 
     if agg.empty:
         return {"error": "No aggregation data available", "sectors": []}
@@ -368,7 +417,7 @@ def get_industry_exposure(sector: Optional[str] = None, as_of_date: Optional[str
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
     taxonomy_lookup = _build_taxonomy_lookup(taxonomy)
 
     # If fund_name filter provided, use GICS mapping on reported holdings
@@ -430,7 +479,7 @@ def get_industry_exposure(sector: Optional[str] = None, as_of_date: Optional[str
         }
 
     # No fund filter - use pre-aggregated data
-    agg = _read_csv(gold / "fact_aggregation_snapshot.csv")
+    agg = _read_table(gold / "fact_aggregation_snapshot.csv")
 
     if agg.empty:
         return {"error": "No aggregation data available", "industries": []}
@@ -530,8 +579,8 @@ def get_geography_exposure(as_of_date: Optional[str] = None) -> dict:
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    agg = _read_csv(gold / "fact_aggregation_snapshot.csv")
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    agg = _read_table(gold / "fact_aggregation_snapshot.csv")
+    taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
 
     if agg.empty:
         return {"error": "No aggregation data available", "countries": []}
@@ -619,8 +668,8 @@ def get_fund_exposure(fund_name: Optional[str] = None) -> dict:
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    exposures = _read_csv(gold / "fact_inferred_exposure.csv")
-    funds = _read_csv(silver / "dim_fund.csv")
+    exposures = _read_table(gold / "fact_inferred_exposure.csv")
+    funds = _read_table(silver / "dim_fund.csv")
 
     if exposures.empty:
         return {"error": "No exposure data available", "funds": []}
@@ -713,10 +762,10 @@ def get_company_exposure(company_name: Optional[str] = None, top_n: int = 20, fu
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    exposures = _read_csv(gold / "fact_inferred_exposure.csv")
-    companies = _read_csv(silver / "dim_company.csv")
-    funds = _read_csv(silver / "dim_fund.csv")
-    classifications = _read_csv(gold / "fact_exposure_classification.csv")
+    exposures = _read_table(gold / "fact_inferred_exposure.csv")
+    companies = _read_table(silver / "dim_company.csv")
+    funds = _read_table(silver / "dim_fund.csv")
+    classifications = _read_table(gold / "fact_exposure_classification.csv")
 
     if exposures.empty:
         return {"error": "No exposure data available", "companies": [], "fund_name_filter": fund_name}
@@ -816,7 +865,7 @@ def get_review_queue(status: str = "pending", priority: Optional[str] = None) ->
     root = _repo_root()
     gold = root / "data" / "gold"
 
-    queue = _read_csv(gold / "fact_review_queue_item.csv")
+    queue = _read_table(gold / "fact_review_queue_item.csv")
 
     if queue.empty:
         return {"total_items": 0, "items_by_priority": {}, "items_by_reason": {}, "items": []}
@@ -888,11 +937,11 @@ def get_portfolio_summary(as_of_date: Optional[str] = None) -> dict:
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    exposures = _read_csv(gold / "fact_inferred_exposure.csv")
-    agg = _read_csv(gold / "fact_aggregation_snapshot.csv")
-    queue = _read_csv(gold / "fact_review_queue_item.csv")
-    classifications = _read_csv(gold / "fact_exposure_classification.csv")
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    exposures = _read_table(gold / "fact_inferred_exposure.csv")
+    agg = _read_table(gold / "fact_aggregation_snapshot.csv")
+    queue = _read_table(gold / "fact_review_queue_item.csv")
+    classifications = _read_table(gold / "fact_exposure_classification.csv")
+    taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
 
     if exposures.empty:
         return {"error": "No exposure data available"}
@@ -983,8 +1032,8 @@ def get_confidence_distribution(taxonomy_type: str = "sector") -> dict:
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    classifications = _read_csv(gold / "fact_exposure_classification.csv")
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    classifications = _read_table(gold / "fact_exposure_classification.csv")
+    taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
 
     if classifications.empty:
         return {"error": "No classification data available", "buckets": []}

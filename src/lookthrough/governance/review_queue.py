@@ -5,15 +5,34 @@ Generates review queue items for cases that need human attention based on:
 - Unclassifiable companies (null node_name)
 - Unresolved entity matches
 - Large unknown exposure buckets
+
+Supports both PostgreSQL and CSV modes:
+- Default: Read/write from PostgreSQL database
+- CSV mode: Set CSV_MODE=1 or use --csv flag for backward compatibility
 """
 from __future__ import annotations
 
+import argparse
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    bulk_insert,
+    dataframe_to_records,
+    delete_all,
+    get_all,
+)
+from src.lookthrough.db.models import (
+    EntityResolutionLog,
+    FactExposureClassification,
+    FactInferredExposure,
+    FactReviewQueueItem,
+)
 from src.lookthrough.schemas.gold_contracts import ReviewQueueItemRow, validate_dataframe
 
 
@@ -41,14 +60,17 @@ def _determine_priority(confidence: float | None, match_method: str | None, reas
     return "low"
 
 
-def generate_review_queue() -> pd.DataFrame:
+def generate_review_queue(csv_mode: bool = False) -> pd.DataFrame:
     """
     Generate review queue items from gold tables.
 
     Sources:
-    - fact_exposure_classification.csv: low confidence or null classifications
-    - entity_resolution_log.csv: unresolved entity matches
-    - fact_inferred_exposure.csv: large unknown exposure buckets
+    - fact_exposure_classification: low confidence or null classifications
+    - entity_resolution_log: unresolved entity matches
+    - fact_inferred_exposure: large unknown exposure buckets
+
+    Args:
+        csv_mode: If True, use CSV files instead of database
 
     Returns:
         DataFrame of review queue items
@@ -57,10 +79,15 @@ def generate_review_queue() -> pd.DataFrame:
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    # Load source data
-    classifications = _read_csv(gold / "fact_exposure_classification.csv")
-    entity_log = _read_csv(gold / "entity_resolution_log.csv")
-    exposures = _read_csv(gold / "fact_inferred_exposure.csv")
+    # Load source data from DB or CSV
+    if csv_mode:
+        classifications = _read_csv(gold / "fact_exposure_classification.csv")
+        entity_log = _read_csv(gold / "entity_resolution_log.csv")
+        exposures = _read_csv(gold / "fact_inferred_exposure.csv")
+    else:
+        classifications = get_all(FactExposureClassification)
+        entity_log = get_all(EntityResolutionLog)
+        exposures = get_all(FactInferredExposure)
 
     queue_items: list[dict] = []
     created_at = datetime.now(timezone.utc).isoformat()
@@ -166,8 +193,13 @@ def generate_review_queue() -> pd.DataFrame:
             print(f"  ... and {len(errors) - 10} more errors")
 
     # Write output
-    out_path = gold / "fact_review_queue_item.csv"
-    queue_df.to_csv(out_path, index=False)
+    if csv_mode:
+        out_path = gold / "fact_review_queue_item.csv"
+        queue_df.to_csv(out_path, index=False)
+    else:
+        delete_all(FactReviewQueueItem)
+        bulk_insert(FactReviewQueueItem, dataframe_to_records(queue_df))
+        out_path = "PostgreSQL:fact_review_queue_item"
 
     # Print summary
     print("Review Queue Summary")
@@ -194,7 +226,15 @@ def generate_review_queue() -> pd.DataFrame:
 
 
 def main() -> None:
-    generate_review_queue()
+    parser = argparse.ArgumentParser(description="Generate review queue")
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+    print(f"Data mode: {'CSV' if csv_mode else 'PostgreSQL'}")
+
+    generate_review_queue(csv_mode=csv_mode)
 
 
 if __name__ == "__main__":

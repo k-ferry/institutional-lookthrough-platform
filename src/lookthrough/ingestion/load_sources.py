@@ -3,18 +3,45 @@
 This module merges holdings from all available sources (synthetic, BDC filings, etc.)
 into the canonical Silver tables the pipeline expects.
 
+Supports both PostgreSQL and CSV modes:
+- Default: Read synthetic from DB, BDC from CSV, write merged to DB
+- CSV mode: Set CSV_MODE=1 or use --csv flag for backward compatibility
+
 Usage:
     python -m src.lookthrough.ingestion.load_sources
+    python -m src.lookthrough.ingestion.load_sources --csv
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import os
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    bulk_insert,
+    dataframe_to_records,
+    delete_all,
+    ensure_tables,
+    get_all,
+    upsert_rows,
+)
+from src.lookthrough.db.models import (
+    DimCompany,
+    DimEntityAlias,
+    DimFund,
+    DimPortfolio,
+    DimTaxonomyNode,
+    FactFundReport,
+    FactReportedHolding,
+    MetaTaxonomyVersion,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -68,12 +95,37 @@ def load_csv_if_exists(path: Path) -> Optional[pd.DataFrame]:
     return None
 
 
-def load_synthetic_tables() -> dict[str, Optional[pd.DataFrame]]:
-    """Load all synthetic Silver tables."""
+def load_synthetic_tables(csv_mode: bool = False) -> dict[str, Optional[pd.DataFrame]]:
+    """Load all synthetic Silver tables from DB or CSV."""
+    if csv_mode:
+        tables = {}
+        for filename in SYNTHETIC_TABLES:
+            name = filename.replace(".csv", "")
+            tables[name] = load_csv_if_exists(SILVER_DIR / filename)
+        return tables
+
+    # Load from database
+    model_map = {
+        "dim_company": DimCompany,
+        "dim_fund": DimFund,
+        "fact_fund_report": FactFundReport,
+        "fact_reported_holding": FactReportedHolding,
+        "dim_taxonomy_node": DimTaxonomyNode,
+        "dim_entity_alias": DimEntityAlias,
+        "dim_portfolio": DimPortfolio,
+        "meta_taxonomy_version": MetaTaxonomyVersion,
+    }
+
     tables = {}
     for filename in SYNTHETIC_TABLES:
         name = filename.replace(".csv", "")
-        tables[name] = load_csv_if_exists(SILVER_DIR / filename)
+        model = model_map.get(name)
+        if model:
+            df = get_all(model)
+            tables[name] = df if not df.empty else None
+        else:
+            tables[name] = None
+
     return tables
 
 
@@ -302,12 +354,13 @@ def add_bdc_funds_to_portfolio(
 # Main Merge Function
 # ---------------------------------------------------------------------------
 
-def load_and_merge_sources() -> dict[str, pd.DataFrame]:
+def load_and_merge_sources(csv_mode: bool = False) -> dict[str, pd.DataFrame]:
     """Load all data sources and merge them into unified Silver tables."""
     print("Loading data sources...")
+    print(f"  Mode: {'CSV' if csv_mode else 'PostgreSQL'}")
 
-    # Load synthetic tables
-    synthetic = load_synthetic_tables()
+    # Load synthetic tables (from DB or CSV based on mode)
+    synthetic = load_synthetic_tables(csv_mode=csv_mode)
     synthetic_counts = {
         name: len(df) if df is not None else 0
         for name, df in synthetic.items()
@@ -378,15 +431,50 @@ def load_and_merge_sources() -> dict[str, pd.DataFrame]:
     return merged, stats
 
 
-def write_merged_tables(merged: dict[str, pd.DataFrame]) -> None:
-    """Write merged tables back to Silver directory."""
-    SILVER_DIR.mkdir(parents=True, exist_ok=True)
+def write_merged_tables(merged: dict[str, pd.DataFrame], csv_mode: bool = False) -> None:
+    """Write merged tables to database or CSV files."""
+    if csv_mode:
+        SILVER_DIR.mkdir(parents=True, exist_ok=True)
+        for name, df in merged.items():
+            if df is not None and not df.empty:
+                path = SILVER_DIR / f"{name}.csv"
+                df.to_csv(path, index=False)
+                print(f"  Wrote {len(df)} rows to {path}")
+        return
+
+    # Write to database
+    model_map = {
+        "dim_company": DimCompany,
+        "dim_fund": DimFund,
+        "fact_fund_report": FactFundReport,
+        "fact_reported_holding": FactReportedHolding,
+        "dim_taxonomy_node": DimTaxonomyNode,
+        "dim_entity_alias": DimEntityAlias,
+        "dim_portfolio": DimPortfolio,
+        "meta_taxonomy_version": MetaTaxonomyVersion,
+    }
+
+    key_columns = {
+        "dim_company": ["company_id"],
+        "dim_fund": ["fund_id"],
+        "fact_fund_report": ["fund_report_id"],
+        "fact_reported_holding": ["reported_holding_id"],
+        "dim_taxonomy_node": ["taxonomy_node_id"],
+        "dim_entity_alias": ["alias_id"],
+        "dim_portfolio": ["portfolio_id"],
+        "meta_taxonomy_version": ["taxonomy_version_id"],
+    }
+
+    ensure_tables()
 
     for name, df in merged.items():
         if df is not None and not df.empty:
-            path = SILVER_DIR / f"{name}.csv"
-            df.to_csv(path, index=False)
-            print(f"  Wrote {len(df)} rows to {path}")
+            model = model_map.get(name)
+            keys = key_columns.get(name, [])
+            if model and keys:
+                records = dataframe_to_records(df)
+                count = upsert_rows(model, records, keys)
+                print(f"  Upserted {len(df)} rows to {name}")
 
 
 def print_summary(stats: dict) -> None:
@@ -433,16 +521,24 @@ def print_summary(stats: dict) -> None:
 
 def main() -> None:
     """Main entry point for the data source loader."""
+    parser = argparse.ArgumentParser(description="Load and merge data sources")
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+
     print("=" * 60)
     print("Unified Data Source Loader")
     print("=" * 60)
+    print(f"Output mode: {'CSV' if csv_mode else 'PostgreSQL'}")
 
     # Load and merge all sources
-    merged, stats = load_and_merge_sources()
+    merged, stats = load_and_merge_sources(csv_mode=csv_mode)
 
     # Write merged tables
-    print("\nWriting merged tables to Silver layer...")
-    write_merged_tables(merged)
+    print(f"\nWriting merged tables to {'CSV' if csv_mode else 'PostgreSQL'}...")
+    write_merged_tables(merged, csv_mode=csv_mode)
 
     # Print summary
     print_summary(stats)

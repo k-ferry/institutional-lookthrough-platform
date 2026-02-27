@@ -2,16 +2,35 @@
 
 Generates an append-only audit trail that logs every significant system action.
 This is critical for governance and explainability.
+
+Supports both PostgreSQL and CSV modes:
+- Default: Read/write from PostgreSQL database
+- CSV mode: Set CSV_MODE=1 or use --csv flag for backward compatibility
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    bulk_insert,
+    dataframe_to_records,
+    get_all,
+)
+from src.lookthrough.db.models import (
+    EntityResolutionLog,
+    FactAuditEvent,
+    FactExposureClassification,
+    FactInferredExposure,
+    FactReviewQueueItem,
+)
 from src.lookthrough.schemas.gold_contracts import AuditEventRow, validate_dataframe
 
 
@@ -26,15 +45,18 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def generate_audit_trail() -> pd.DataFrame:
+def generate_audit_trail(csv_mode: bool = False) -> pd.DataFrame:
     """
     Generate audit events from Gold table outputs.
 
     Sources:
-    - fact_exposure_classification.csv: AI classification events
-    - fact_review_queue_item.csv: Review queue insert events
-    - entity_resolution_log.csv: Entity resolution events
-    - fact_inferred_exposure.csv: Pipeline run completion event
+    - fact_exposure_classification: AI classification events
+    - fact_review_queue_item: Review queue insert events
+    - entity_resolution_log: Entity resolution events
+    - fact_inferred_exposure: Pipeline run completion event
+
+    Args:
+        csv_mode: If True, use CSV files instead of database
 
     Returns:
         DataFrame of audit events
@@ -43,11 +65,17 @@ def generate_audit_trail() -> pd.DataFrame:
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    # Load source data
-    classifications = _read_csv(gold / "fact_exposure_classification.csv")
-    review_queue = _read_csv(gold / "fact_review_queue_item.csv")
-    entity_log = _read_csv(gold / "entity_resolution_log.csv")
-    exposures = _read_csv(gold / "fact_inferred_exposure.csv")
+    # Load source data from DB or CSV
+    if csv_mode:
+        classifications = _read_csv(gold / "fact_exposure_classification.csv")
+        review_queue = _read_csv(gold / "fact_review_queue_item.csv")
+        entity_log = _read_csv(gold / "entity_resolution_log.csv")
+        exposures = _read_csv(gold / "fact_inferred_exposure.csv")
+    else:
+        classifications = get_all(FactExposureClassification)
+        review_queue = get_all(FactReviewQueueItem)
+        entity_log = get_all(EntityResolutionLog)
+        exposures = get_all(FactInferredExposure)
 
     audit_events: list[dict] = []
     event_time = datetime.now(timezone.utc).isoformat()
@@ -167,9 +195,14 @@ def generate_audit_trail() -> pd.DataFrame:
         if len(errors) > 10:
             print(f"  ... and {len(errors) - 10} more errors")
 
-    # Write output
-    out_path = gold / "fact_audit_event.csv"
-    audit_df.to_csv(out_path, index=False)
+    # Write output (append-only, don't delete existing)
+    if csv_mode:
+        out_path = gold / "fact_audit_event.csv"
+        audit_df.to_csv(out_path, index=False)
+    else:
+        # Append to existing audit events (don't delete)
+        bulk_insert(FactAuditEvent, dataframe_to_records(audit_df))
+        out_path = "PostgreSQL:fact_audit_event"
 
     # Print summary
     print("Audit Trail Summary")
@@ -195,7 +228,15 @@ def generate_audit_trail() -> pd.DataFrame:
 
 
 def main() -> None:
-    generate_audit_trail()
+    parser = argparse.ArgumentParser(description="Generate audit trail")
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+    print(f"Data mode: {'CSV' if csv_mode else 'PostgreSQL'}")
+
+    generate_audit_trail(csv_mode=csv_mode)
 
 
 if __name__ == "__main__":

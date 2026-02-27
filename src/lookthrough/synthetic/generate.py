@@ -5,10 +5,16 @@ Generates realistic synthetic data with intentional imperfections:
 - Missing fields (sector/country/value)
 - Partial coverage (only top holdings reported)
 - Conflicting classifications
+
+Supports both PostgreSQL and CSV output modes:
+- Default: Write to PostgreSQL database
+- CSV mode: Set CSV_MODE=1 or use --csv flag for backward compatibility
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -18,6 +24,24 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    bulk_insert,
+    dataframe_to_records,
+    delete_all,
+    ensure_tables,
+)
+from src.lookthrough.db.models import (
+    DimCompany,
+    DimEntityAlias,
+    DimFund,
+    DimPortfolio,
+    DimTaxonomyNode,
+    FactFundReport,
+    FactReportedHolding,
+    MetaTaxonomyVersion,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -466,7 +490,93 @@ def generate_holdings(
 # Main
 # ---------------------------------------------------------------------------
 
+def _write_to_db(
+    taxonomy_version_df: pd.DataFrame,
+    taxonomy_nodes_df: pd.DataFrame,
+    portfolio_df: pd.DataFrame,
+    funds_df: pd.DataFrame,
+    companies_df: pd.DataFrame,
+    aliases_df: pd.DataFrame,
+    reports_df: pd.DataFrame,
+    holdings_df: pd.DataFrame,
+) -> None:
+    """Write all generated data to PostgreSQL database."""
+    print("\nWriting outputs to PostgreSQL...")
+
+    # Ensure tables exist
+    ensure_tables()
+
+    # Clear existing synthetic data (to allow re-runs)
+    # Delete in reverse dependency order
+    print("  Clearing existing synthetic data...")
+    delete_all(FactReportedHolding)
+    delete_all(FactFundReport)
+    delete_all(DimEntityAlias)
+    delete_all(DimCompany)
+    delete_all(DimFund)
+    delete_all(DimPortfolio)
+    delete_all(DimTaxonomyNode)
+    delete_all(MetaTaxonomyVersion)
+
+    # Insert new data
+    print("  Inserting meta_taxonomy_version...")
+    bulk_insert(MetaTaxonomyVersion, dataframe_to_records(taxonomy_version_df))
+
+    print("  Inserting dim_taxonomy_node...")
+    bulk_insert(DimTaxonomyNode, dataframe_to_records(taxonomy_nodes_df))
+
+    print("  Inserting dim_portfolio...")
+    bulk_insert(DimPortfolio, dataframe_to_records(portfolio_df))
+
+    print("  Inserting dim_fund...")
+    bulk_insert(DimFund, dataframe_to_records(funds_df))
+
+    print("  Inserting dim_company...")
+    bulk_insert(DimCompany, dataframe_to_records(companies_df))
+
+    print("  Inserting dim_entity_alias...")
+    if not aliases_df.empty:
+        bulk_insert(DimEntityAlias, dataframe_to_records(aliases_df))
+
+    print("  Inserting fact_fund_report...")
+    bulk_insert(FactFundReport, dataframe_to_records(reports_df))
+
+    print("  Inserting fact_reported_holding...")
+    bulk_insert(FactReportedHolding, dataframe_to_records(holdings_df))
+
+
+def _write_to_csv(
+    paths: Paths,
+    taxonomy_version_df: pd.DataFrame,
+    taxonomy_nodes_df: pd.DataFrame,
+    portfolio_df: pd.DataFrame,
+    funds_df: pd.DataFrame,
+    companies_df: pd.DataFrame,
+    aliases_df: pd.DataFrame,
+    reports_df: pd.DataFrame,
+    holdings_df: pd.DataFrame,
+) -> None:
+    """Write all generated data to CSV files (backward compatibility)."""
+    print(f"\nWriting outputs to CSV: {paths.data_silver}")
+
+    taxonomy_version_df.to_csv(paths.data_silver / "meta_taxonomy_version.csv", index=False)
+    taxonomy_nodes_df.to_csv(paths.data_silver / "dim_taxonomy_node.csv", index=False)
+    portfolio_df.to_csv(paths.data_silver / "dim_portfolio.csv", index=False)
+    funds_df.to_csv(paths.data_silver / "dim_fund.csv", index=False)
+    companies_df.to_csv(paths.data_silver / "dim_company.csv", index=False)
+    aliases_df.to_csv(paths.data_silver / "dim_entity_alias.csv", index=False)
+    reports_df.to_csv(paths.data_silver / "fact_fund_report.csv", index=False)
+    holdings_df.to_csv(paths.data_silver / "fact_reported_holding.csv", index=False)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate synthetic data")
+    parser.add_argument("--csv", action="store_true", help="Write to CSV instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+
     repo_root = Path(__file__).resolve().parents[3]
     config_path = repo_root / "src" / "lookthrough" / "synthetic" / "config.yaml"
     cfg = load_config(config_path)
@@ -483,6 +593,7 @@ def main() -> None:
 
     print(f"Generating synthetic data with seed={seed}")
     print(f"Counts: {cfg['v1']['counts']}")
+    print(f"Output mode: {'CSV' if csv_mode else 'PostgreSQL'}")
 
     # Generate taxonomy
     print("Generating taxonomy...")
@@ -508,28 +619,41 @@ def main() -> None:
     print("Generating holdings...")
     holdings_df = generate_holdings(cfg, reports_df, companies_df, funds_df, rng)
 
-    # Save all outputs
-    print(f"\nWriting outputs to: {paths.data_silver}")
-
-    taxonomy_version_df.to_csv(paths.data_silver / "meta_taxonomy_version.csv", index=False)
-    taxonomy_nodes_df.to_csv(paths.data_silver / "dim_taxonomy_node.csv", index=False)
-    portfolio_df.to_csv(paths.data_silver / "dim_portfolio.csv", index=False)
-    funds_df.to_csv(paths.data_silver / "dim_fund.csv", index=False)
-    companies_df.to_csv(paths.data_silver / "dim_company.csv", index=False)
-    aliases_df.to_csv(paths.data_silver / "dim_entity_alias.csv", index=False)
-    reports_df.to_csv(paths.data_silver / "fact_fund_report.csv", index=False)
-    holdings_df.to_csv(paths.data_silver / "fact_reported_holding.csv", index=False)
+    # Write output based on mode
+    if csv_mode:
+        _write_to_csv(
+            paths,
+            taxonomy_version_df,
+            taxonomy_nodes_df,
+            portfolio_df,
+            funds_df,
+            companies_df,
+            aliases_df,
+            reports_df,
+            holdings_df,
+        )
+    else:
+        _write_to_db(
+            taxonomy_version_df,
+            taxonomy_nodes_df,
+            portfolio_df,
+            funds_df,
+            companies_df,
+            aliases_df,
+            reports_df,
+            holdings_df,
+        )
 
     # Print summary
-    print("\nGenerated files:")
-    print(f"  - meta_taxonomy_version.csv: {len(taxonomy_version_df)} rows")
-    print(f"  - dim_taxonomy_node.csv: {len(taxonomy_nodes_df)} rows")
-    print(f"  - dim_portfolio.csv: {len(portfolio_df)} rows")
-    print(f"  - dim_fund.csv: {len(funds_df)} rows")
-    print(f"  - dim_company.csv: {len(companies_df)} rows")
-    print(f"  - dim_entity_alias.csv: {len(aliases_df)} rows")
-    print(f"  - fact_fund_report.csv: {len(reports_df)} rows")
-    print(f"  - fact_reported_holding.csv: {len(holdings_df)} rows")
+    print("\nGenerated data:")
+    print(f"  - meta_taxonomy_version: {len(taxonomy_version_df)} rows")
+    print(f"  - dim_taxonomy_node: {len(taxonomy_nodes_df)} rows")
+    print(f"  - dim_portfolio: {len(portfolio_df)} rows")
+    print(f"  - dim_fund: {len(funds_df)} rows")
+    print(f"  - dim_company: {len(companies_df)} rows")
+    print(f"  - dim_entity_alias: {len(aliases_df)} rows")
+    print(f"  - fact_fund_report: {len(reports_df)} rows")
+    print(f"  - fact_reported_holding: {len(holdings_df)} rows")
 
     print("\nDone.")
 

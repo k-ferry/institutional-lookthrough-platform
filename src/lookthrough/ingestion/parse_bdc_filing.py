@@ -39,6 +39,130 @@ EXTRACTION_CONFIDENCE = 0.85
 MAX_REASONABLE_HOLDING_VALUE_USD = 5_000_000_000  # $5 billion
 
 
+def extract_fund_nav(html_content: str) -> Optional[float]:
+    """Extract total net assets (NAV) from the Consolidated Balance Sheet.
+
+    Searches for patterns like "Total net assets", "Total stockholders' equity",
+    or "Total stockholders' equity" in balance sheet tables and extracts the value.
+
+    10-K filings may contain multiple balance sheet tables (for subsidiaries, VIEs, etc.)
+    so we find all candidates and select the one with the largest NAV value, which
+    typically represents the consolidated entity.
+
+    Args:
+        html_content: Raw HTML content of the 10-K filing
+
+    Returns:
+        Total net assets in USD, or None if extraction fails
+    """
+    soup = BeautifulSoup(html_content, "lxml")
+
+    # Detect denomination for the filing
+    denomination = detect_value_denomination(html_content)
+
+    # Find ALL balance sheet tables (contain Total assets + Total liabilities + equity/net assets)
+    tables = soup.find_all("table")
+    balance_sheet_tables = []
+
+    for table in tables:
+        text = table.get_text().lower()
+        if (
+            "total assets" in text
+            and "total liabilities" in text
+            and ("stockholders" in text or "equity" in text or "net assets" in text)
+        ):
+            balance_sheet_tables.append(table)
+
+    if not balance_sheet_tables:
+        logger.warning("Could not find any balance sheet tables")
+        return None
+
+    logger.debug(f"Found {len(balance_sheet_tables)} potential balance sheet tables")
+
+    # Look for NAV-related rows in each balance sheet
+    # Priority order: "Total net assets" > "Total stockholders' equity" > "Total equity"
+    # Note: Must handle different apostrophe characters:
+    #   - ASCII apostrophe: ' (U+0027)
+    #   - Right single quotation mark: ' (U+2019, common in SEC filings)
+    nav_patterns = [
+        "total net assets",
+        "total stockholders' equity",   # ASCII apostrophe
+        "total stockholders\u2019 equity",  # RIGHT SINGLE QUOTATION MARK (U+2019)
+        "total stockholders equity",    # no apostrophe
+        "total equity",
+    ]
+
+    # Extract NAV candidates from all balance sheet tables
+    nav_candidates = []
+
+    for table in balance_sheet_tables:
+        rows = table.find_all("tr")
+        for pattern in nav_patterns:
+            for row in rows:
+                row_text = row.get_text().lower()
+                # Match pattern but not "total liabilities and net assets"
+                if pattern in row_text and "liabilities and" not in row_text:
+                    # Extract numeric values from this row
+                    cells = row.find_all(["td", "th"])
+                    for cell in cells:
+                        cell_text = cell.get_text(strip=True)
+                        # Try to parse as a number
+                        value = _parse_balance_sheet_value(cell_text)
+                        if value is not None and value > 0:
+                            nav_candidates.append((pattern, value))
+                            break  # Take first valid value from this row
+                    break  # Move to next table after finding a match for this pattern
+
+    if not nav_candidates:
+        logger.warning("Could not extract NAV from any balance sheet table")
+        return None
+
+    # Select the largest NAV value (represents the consolidated entity)
+    best_pattern, best_value = max(nav_candidates, key=lambda x: x[1])
+
+    # Apply denomination multiplier
+    nav_usd = best_value * denomination
+    logger.info(
+        f"Extracted NAV from '{best_pattern}': {best_value:,.0f} "
+        f"x {denomination:,} = ${nav_usd:,.0f}"
+    )
+    return nav_usd
+
+
+def _parse_balance_sheet_value(text: str) -> Optional[float]:
+    """Parse a numeric value from a balance sheet cell.
+
+    Handles formats like: "$14,318", "2,797,838", "5,952.8", "(14,318)"
+    """
+    if not text:
+        return None
+
+    # Remove dollar signs, spaces
+    cleaned = text.strip().replace("$", "").replace(" ", "").replace("\xa0", "")
+
+    # Skip empty, dashes, or non-numeric
+    if not cleaned or cleaned in ("—", "–", "-", ""):
+        return None
+
+    # Handle parentheses (negative values) - skip these for NAV
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        return None
+
+    # Remove commas, keep decimal point
+    cleaned = cleaned.replace(",", "")
+
+    try:
+        value = float(cleaned)
+        # NAV should be positive and reasonably large (at least $100M raw value)
+        # to avoid picking up small values like percentages
+        if value > 100:
+            return value
+    except ValueError:
+        pass
+
+    return None
+
+
 def detect_value_denomination(content: str) -> int:
     """Detect if values in the filing are in thousands or millions.
 
@@ -972,8 +1096,17 @@ def parse_bdc_filing(filename: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     )
 
     # Create fund report record
-    # Apply detected denomination multiplier
-    total_fair_value = sum(h.fair_value for h in all_holdings if h.fair_value) * value_multiplier
+    # Try to extract actual NAV from balance sheet first
+    nav_usd = extract_fund_nav(content)
+
+    if nav_usd is None:
+        # Fall back to computing NAV from sum of fair values (approximate)
+        total_fair_value = sum(h.fair_value for h in all_holdings if h.fair_value) * value_multiplier
+        logger.warning(
+            f"Could not extract NAV from balance sheet, falling back to sum of fair values: "
+            f"${total_fair_value:,.0f}"
+        )
+        nav_usd = total_fair_value
 
     fund_report_df = pd.DataFrame(
         [
@@ -984,7 +1117,7 @@ def parse_bdc_filing(filename: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
                 "received_date": datetime.now().strftime("%Y-%m-%d"),
                 "document_id": None,
                 "coverage_estimate": 1.0,  # Full coverage for direct filings
-                "nav_usd": total_fair_value,
+                "nav_usd": nav_usd,
             }
         ]
     )

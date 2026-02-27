@@ -2,13 +2,13 @@
 V1 Aggregation: Produce fact_aggregation_snapshot from inferred exposures.
 
 Reads:
-  - data/gold/fact_inferred_exposure.csv
-  - data/silver/dim_taxonomy_node.csv
-  - data/silver/dim_company.csv
-  - data/gold/fact_exposure_classification.csv (optional, AI classifications)
+  - fact_inferred_exposure (Gold)
+  - dim_taxonomy_node (Silver)
+  - dim_company (Silver)
+  - fact_exposure_classification (Gold, optional, AI classifications)
 
 Writes:
-  - data/gold/fact_aggregation_snapshot.csv
+  - fact_aggregation_snapshot (Gold)
 
 Aggregates exposures by:
   - taxonomy_type = "sector"    -> level 1 sector nodes
@@ -18,14 +18,36 @@ Aggregates exposures by:
 If AI classifications exist, they override deterministic company lookups for
 industry classification, and provide confidence scores for weighted metrics.
 
+Supports both PostgreSQL and CSV modes:
+- Default: Read/write from PostgreSQL database
+- CSV mode: Set CSV_MODE=1 or use --csv flag for backward compatibility
+
 Run via: python -m src.lookthrough.inference.aggregate
 """
 from __future__ import annotations
 
+import argparse
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from src.lookthrough.db.repository import (
+    _is_csv_mode,
+    bulk_insert,
+    dataframe_to_records,
+    delete_all,
+    get_all,
+)
+from src.lookthrough.db.models import (
+    DimCompany,
+    DimTaxonomyNode,
+    FactAggregationSnapshot,
+    FactExposureClassification,
+    FactInferredExposure,
+    FactReportedHolding,
+)
 
 # Stable placeholder for unknown/missing taxonomy classification
 UNKNOWN_TAXONOMY_NODE_ID = "00000000-0000-0000-0000-000000000000"
@@ -106,17 +128,23 @@ def _get_sector_node_id(
     return UNKNOWN_TAXONOMY_NODE_ID
 
 
-def _load_classifications(gold_path: Path) -> dict:
+def _load_classifications(gold_path: Path, csv_mode: bool = False) -> dict:
     """
     Load AI classifications if available.
 
     Returns lookup: (company_id, taxonomy_type) -> {taxonomy_node_id, confidence}
     """
-    classification_file = gold_path / "fact_exposure_classification.csv"
-    if not classification_file.exists():
+    if csv_mode:
+        classification_file = gold_path / "fact_exposure_classification.csv"
+        if not classification_file.exists():
+            return {}
+        df = pd.read_csv(classification_file)
+    else:
+        df = get_all(FactExposureClassification)
+
+    if df.empty:
         return {}
 
-    df = pd.read_csv(classification_file)
     lookup = {}
     for _, row in df.iterrows():
         company_id = str(row["company_id"]) if pd.notna(row.get("company_id")) else None
@@ -130,17 +158,23 @@ def _load_classifications(gold_path: Path) -> dict:
     return lookup
 
 
-def _load_reported_sector_lookup(silver_path: Path) -> dict:
+def _load_reported_sector_lookup(silver_path: Path, csv_mode: bool = False) -> dict:
     """
     Load reported_sector values from holdings to use as fallback classification.
 
     Returns lookup: company_id -> reported_sector (string)
     """
-    holdings_file = silver_path / "fact_reported_holding.csv"
-    if not holdings_file.exists():
+    if csv_mode:
+        holdings_file = silver_path / "fact_reported_holding.csv"
+        if not holdings_file.exists():
+            return {}
+        df = pd.read_csv(holdings_file)
+    else:
+        df = get_all(FactReportedHolding)
+
+    if df.empty:
         return {}
 
-    df = pd.read_csv(holdings_file)
     lookup = {}
 
     # For each company_id, collect reported_sector values
@@ -198,38 +232,46 @@ def _build_reported_sector_to_taxonomy_lookup(taxonomy_df: pd.DataFrame) -> dict
     return lookup
 
 
-def aggregate_exposures_v1() -> pd.DataFrame:
+def aggregate_exposures_v1(csv_mode: bool = False) -> pd.DataFrame:
     """
     V1 aggregation: group inferred exposures by taxonomy buckets.
 
     Produces one row per (run_id, portfolio_id, as_of_date, taxonomy_type, taxonomy_node_id).
 
     Classification priority:
-    1. AI classifications from fact_exposure_classification.csv (highest priority)
+    1. AI classifications from fact_exposure_classification (highest priority)
     2. reported_sector from holdings (confidence 0.75)
     3. Deterministic lookup from dim_company (confidence 1.0)
     4. Unknown (confidence 0.0)
+
+    Args:
+        csv_mode: If True, use CSV files instead of database
     """
     root = _repo_root()
     silver = root / "data" / "silver"
     gold = root / "data" / "gold"
     gold.mkdir(parents=True, exist_ok=True)
 
-    # Load inputs
-    exposures = _read_csv(gold / "fact_inferred_exposure.csv")
-    companies = _read_csv(silver / "dim_company.csv")
-    taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    # Load inputs from DB or CSV
+    if csv_mode:
+        exposures = _read_csv(gold / "fact_inferred_exposure.csv")
+        companies = _read_csv(silver / "dim_company.csv")
+        taxonomy = _read_csv(silver / "dim_taxonomy_node.csv")
+    else:
+        exposures = get_all(FactInferredExposure)
+        companies = get_all(DimCompany)
+        taxonomy = get_all(DimTaxonomyNode)
 
     taxonomy_lookup = _build_taxonomy_lookup(taxonomy)
 
     # Load AI classifications if available
-    classification_lookup = _load_classifications(gold)
+    classification_lookup = _load_classifications(gold, csv_mode=csv_mode)
     use_ai_classifications = len(classification_lookup) > 0
     if use_ai_classifications:
         print(f"Using AI classifications: {len(classification_lookup)} entries")
 
     # Load reported_sector from holdings as fallback classification source
-    reported_sector_lookup = _load_reported_sector_lookup(silver)
+    reported_sector_lookup = _load_reported_sector_lookup(silver, csv_mode=csv_mode)
     if reported_sector_lookup:
         print(f"Using reported_sector fallback: {len(reported_sector_lookup)} companies")
 
@@ -384,17 +426,30 @@ def aggregate_exposures_v1() -> pd.DataFrame:
     ).reset_index(drop=True)
 
     # Write output
-    out_path = gold / "fact_aggregation_snapshot.csv"
-    result.to_csv(out_path, index=False)
+    if csv_mode:
+        out_path = gold / "fact_aggregation_snapshot.csv"
+        result.to_csv(out_path, index=False)
+        print(f"Wrote: {out_path}")
+    else:
+        delete_all(FactAggregationSnapshot)
+        bulk_insert(FactAggregationSnapshot, dataframe_to_records(result))
+        print("Wrote: PostgreSQL:fact_aggregation_snapshot")
 
-    print(f"Wrote: {out_path}")
     print(f"Rows: {len(result)}")
 
     return result
 
 
 def main() -> None:
-    aggregate_exposures_v1()
+    parser = argparse.ArgumentParser(description="Aggregate exposures")
+    parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
+    args = parser.parse_args()
+
+    # Check CSV mode from args or environment
+    csv_mode = args.csv or _is_csv_mode()
+    print(f"Data mode: {'CSV' if csv_mode else 'PostgreSQL'}")
+
+    aggregate_exposures_v1(csv_mode=csv_mode)
 
 
 if __name__ == "__main__":
