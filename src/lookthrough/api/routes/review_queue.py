@@ -425,19 +425,27 @@ def research_company(
     Returns {response, provider, model, duration_ms} on success or {error} on failure.
     Provider must be one of: claude, openai, ollama.
     """
-    prompt = (
-        "You are a financial analyst assistant. Research this company and provide a brief classification summary.\n"
-        f"Company name: {body.company_name}\n"
-        f"Raw name from filing: {body.raw_company_name or 'N/A'}\n"
-        f"Reported sector: {body.reported_sector or 'Not provided'}\n\n"
-        "Please provide:\n"
-        "1. What this company does (2-3 sentences)\n"
-        "2. Most likely GICS sector and industry classification with reasoning\n"
-        "3. Confidence level (high/medium/low) and why\n"
-        "4. Any notes that would help an analyst classify this company\n\n"
-        "Be concise. If you don't have reliable information about this specific company, "
-        "say so clearly rather than guessing."
-    )
+    if body.provider == "ollama":
+        prompt = (
+            f"You are a financial analyst. For this company: {body.company_name} "
+            f"(reported sector: {body.reported_sector or 'unknown'}), briefly state: "
+            "1) what the company likely does, 2) the most likely GICS sector, "
+            "3) confidence level. Be concise, 3-5 sentences max."
+        )
+    else:
+        prompt = (
+            "You are a financial analyst assistant. Research this company and provide a brief classification summary.\n"
+            f"Company name: {body.company_name}\n"
+            f"Raw name from filing: {body.raw_company_name or 'N/A'}\n"
+            f"Reported sector: {body.reported_sector or 'Not provided'}\n\n"
+            "Please provide:\n"
+            "1. What this company does (2-3 sentences)\n"
+            "2. Most likely GICS sector and industry classification with reasoning\n"
+            "3. Confidence level (high/medium/low) and why\n"
+            "4. Any notes that would help an analyst classify this company\n\n"
+            "Be concise. If you don't have reliable information about this specific company, "
+            "say so clearly rather than guessing."
+        )
 
     start = time.monotonic()
 
@@ -502,7 +510,7 @@ def research_company(
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                 },
-                timeout=120,
+                timeout=300,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -514,11 +522,10 @@ def research_company(
                 "model": "llama3.1",
                 "duration_ms": duration_ms,
             }
+        except _requests.exceptions.ConnectionError:
+            return {"error": "Cannot connect to Ollama. Is it running at localhost:11434?"}
         except Exception as e:
-            err = str(e)
-            if "Connection" in err or "connect" in err.lower():
-                return {"error": "Cannot connect to Ollama. Is it running at localhost:11434?"}
-            return {"error": err}
+            return {"error": str(e)}
 
     else:
         return {"error": f"Unknown provider '{body.provider}'. Must be: claude, openai, or ollama."}

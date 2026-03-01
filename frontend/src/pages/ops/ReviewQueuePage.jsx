@@ -464,7 +464,11 @@ function DetailPanel({ item, onAction, actionLoading }) {
           ) : (
             <Sparkles className="h-4 w-4" />
           )}
-          {researchLoading ? 'Researching…' : 'Research Company'}
+          {researchLoading
+            ? selectedProvider === 'ollama'
+              ? 'Researching… (local models may take 30–60s)'
+              : 'Researching…'
+            : 'Research Company'}
         </button>
 
         {/* Response area */}
