@@ -11,6 +11,9 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Info,
+  Sparkles,
+  Loader2,
 } from 'lucide-react'
 import { Card, CardContent } from '../../components/ui/card'
 
@@ -23,6 +26,17 @@ const REASON_LABELS = {
   low_confidence_classification: 'Low Confidence',
   unclassifiable_company: 'Cannot Classify',
   large_unknown_exposure: 'Large Unknown Exposure',
+}
+
+const REASON_TOOLTIPS = {
+  unresolved_entity:
+    'Company name could not be matched to any known entity after 5 resolution strategies',
+  low_confidence_classification:
+    'AI classification confidence is below 0.70 — manual verification recommended',
+  unclassifiable_company:
+    'AI attempted classification but confidence was below threshold or returned null',
+  large_unknown_exposure:
+    'Exposure value exceeds $1M but company has no sector classification',
 }
 
 const REASON_OPTIONS = [
@@ -73,6 +87,28 @@ function formatTimestamp(ts) {
   } catch {
     return ts
   }
+}
+
+function formatCurrency(value) {
+  if (value == null) return 'N/A'
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)}B`
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`
+  return `$${value.toFixed(0)}`
+}
+
+function confidenceColorClass(score) {
+  if (score == null) return 'text-secondary-400'
+  if (score >= 0.9) return 'text-green-600'
+  if (score >= 0.75) return 'text-yellow-600'
+  return 'text-red-600'
+}
+
+function confidenceBadgeClass(score) {
+  if (score == null) return 'bg-secondary-100 text-secondary-500'
+  if (score >= 0.9) return 'bg-green-100 text-green-700'
+  if (score >= 0.75) return 'bg-yellow-100 text-yellow-700'
+  return 'bg-red-100 text-red-700'
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +204,337 @@ function Pagination({ page, totalPages, onPageChange }) {
   )
 }
 
+// Reason badge with hover tooltip
+function ReasonBadge({ reason }) {
+  const label = REASON_LABELS[reason] ?? reason
+  const tooltip = REASON_TOOLTIPS[reason]
+  return (
+    <span className="relative group inline-flex items-center gap-1 cursor-default">
+      <span className="text-secondary-600 text-xs">{label}</span>
+      {tooltip && (
+        <>
+          <Info className="h-3 w-3 text-secondary-400 flex-shrink-0" />
+          <span className="absolute left-0 bottom-full mb-2 z-20 w-72 px-3 py-2 text-xs text-white bg-secondary-800 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none leading-relaxed">
+            {tooltip}
+          </span>
+        </>
+      )}
+    </span>
+  )
+}
+
+// Confidence score as a colored percentage badge
+function ConfidenceBadge({ score }) {
+  if (score == null) return <span className="text-secondary-400 text-xs">—</span>
+  const pct = Math.round(score * 100)
+  return (
+    <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ${confidenceBadgeClass(score)}`}>
+      {pct}%
+    </span>
+  )
+}
+
+const NULL_UUID = '00000000-0000-0000-0000-000000000000'
+
+function ProviderBadge({ provider }) {
+  const config = {
+    claude: { label: 'Claude', cls: 'bg-amber-100 text-amber-700' },
+    openai: { label: 'GPT-4o', cls: 'bg-green-100 text-green-700' },
+    ollama: { label: 'Llama3.1', cls: 'bg-purple-100 text-purple-700' },
+  }[provider] || { label: provider, cls: 'bg-secondary-100 text-secondary-600' }
+  return (
+    <span className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-semibold ${config.cls}`}>
+      {config.label}
+    </span>
+  )
+}
+
+// Expandable detail panel rendered as a full-width row below the item row
+function DetailPanel({ item, onAction, actionLoading }) {
+  const [notes, setNotes] = useState('')
+  const [selectedProvider, setSelectedProvider] = useState('claude')
+  const [researchLoading, setResearchLoading] = useState(false)
+  const [researchResult, setResearchResult] = useState(null)
+  const ai = item.ai_classification
+  const isProcessing = actionLoading === item.queue_item_id
+
+  async function handleResearch() {
+    setResearchLoading(true)
+    setResearchResult(null)
+    try {
+      const res = await fetch('/api/review-queue/research', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          company_name: item.company_name,
+          company_id: item.company_id,
+          raw_company_name: item.raw_company_name,
+          reported_sector: item.reported_sector,
+          provider: selectedProvider,
+        }),
+      })
+      const data = await res.json()
+      setResearchResult(data)
+    } catch (e) {
+      setResearchResult({ error: `Request failed: ${e.message}` })
+    } finally {
+      setResearchLoading(false)
+    }
+  }
+
+  return (
+    <div className="bg-secondary-50 border-t border-secondary-200 px-6 py-5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        {/* LEFT — Company Context */}
+        <div className="space-y-4">
+
+          {/* Name */}
+          <div>
+            <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-1">Company</p>
+            <p className="text-lg font-bold text-secondary-900 leading-tight">{item.company_name ?? '—'}</p>
+            {item.raw_company_name && item.raw_company_name !== item.company_name && (
+              <p className="text-xs text-secondary-400 mt-0.5">Raw: {item.raw_company_name}</p>
+            )}
+          </div>
+
+          {/* Fund badges */}
+          {item.fund_names?.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-1.5">Funds</p>
+              <div className="flex flex-wrap gap-1.5">
+                {item.fund_names.map((name) => (
+                  <span
+                    key={name}
+                    className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-primary-50 text-primary-700 border border-primary-200"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Holdings summary cards */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-secondary-200 bg-white px-3 py-2.5">
+              <p className="text-xs text-secondary-400">Holdings</p>
+              <p className="text-sm font-semibold text-secondary-900 mt-0.5">
+                {item.holding_count != null ? item.holding_count.toLocaleString() : 'N/A'}
+              </p>
+            </div>
+            <div className="rounded-lg border border-secondary-200 bg-white px-3 py-2.5">
+              <p className="text-xs text-secondary-400">Total Value</p>
+              <p className="text-sm font-semibold text-secondary-900 mt-0.5">
+                {formatCurrency(item.reported_value_usd)}
+              </p>
+            </div>
+          </div>
+
+          {/* Filed sector */}
+          <div>
+            <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-1">Filed As</p>
+            {item.reported_sector ? (
+              <p className="text-sm text-secondary-700">{item.reported_sector}</p>
+            ) : (
+              <p className="text-sm text-secondary-400 italic">No sector in filing</p>
+            )}
+          </div>
+
+          {/* Entity resolution */}
+          <div>
+            <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-1.5">
+              Entity Resolution
+            </p>
+            {item.match_method ? (
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-secondary-600 bg-secondary-100 rounded px-2 py-0.5 font-mono">
+                  {item.match_method.replace(/_/g, ' ')}
+                </span>
+                <span className={`text-sm font-semibold ${confidenceColorClass(item.match_confidence)}`}>
+                  {item.match_confidence != null
+                    ? `${Math.round(item.match_confidence * 100)}%`
+                    : '—'}
+                </span>
+              </div>
+            ) : (
+              <p className="text-xs text-secondary-400 italic">No match recorded</p>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT — AI Classification */}
+        <div className="space-y-3">
+          <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide">AI Classification</p>
+          {ai ? (
+            <div className="rounded-lg border border-secondary-200 bg-white p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm font-semibold leading-snug">
+                  {ai.node_name ? (
+                    <span className="text-secondary-900">{ai.node_name}</span>
+                  ) : !ai.taxonomy_node_id || ai.taxonomy_node_id === NULL_UUID ? (
+                    <span className="text-red-400">Could not classify</span>
+                  ) : (
+                    <span className="text-secondary-900">{ai.taxonomy_node_id}</span>
+                  )}
+                </p>
+                <ConfidenceBadge score={ai.confidence} />
+              </div>
+              {ai.rationale && (
+                <div>
+                  <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-1">
+                    Rationale
+                  </p>
+                  <p className="text-xs text-secondary-600 leading-relaxed">{ai.rationale}</p>
+                </div>
+              )}
+              {ai.model && (
+                <p className="text-xs text-secondary-400 font-mono mt-1">{ai.model}</p>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-secondary-200 bg-white p-4">
+              <p className="text-sm text-secondary-400 italic">AI could not classify this company</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* RESEARCH — LLM research panel */}
+      <div className="mt-5 pt-4 border-t border-secondary-200">
+        <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-3">
+          Research this Company
+        </p>
+
+        {/* LLM selector */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          {[
+            {
+              id: 'claude',
+              label: 'Claude',
+              activeClass: 'bg-amber-500 border-amber-500 text-white',
+              hoverClass: 'hover:border-amber-400 hover:text-amber-600',
+            },
+            {
+              id: 'openai',
+              label: 'GPT-4o',
+              activeClass: 'bg-green-600 border-green-600 text-white',
+              hoverClass: 'hover:border-green-500 hover:text-green-600',
+            },
+            {
+              id: 'ollama',
+              label: 'Llama3.1 — Local',
+              activeClass: 'bg-purple-600 border-purple-600 text-white',
+              hoverClass: 'hover:border-purple-500 hover:text-purple-600',
+              badge: true,
+            },
+          ].map(({ id, label, activeClass, hoverClass, badge }) => (
+            <button
+              key={id}
+              onClick={() => setSelectedProvider(id)}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${
+                selectedProvider === id
+                  ? activeClass
+                  : `bg-white text-secondary-600 border-secondary-200 ${hoverClass}`
+              }`}
+            >
+              {label}
+              {badge && (
+                <span
+                  className={`ml-1 text-[10px] px-1 rounded ${
+                    selectedProvider === id ? 'bg-white/25 text-white' : 'bg-purple-100 text-purple-700'
+                  }`}
+                >
+                  free
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* Research button */}
+        <button
+          onClick={handleResearch}
+          disabled={researchLoading}
+          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-slate-800 rounded-md hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {researchLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Sparkles className="h-4 w-4" />
+          )}
+          {researchLoading ? 'Researching…' : 'Research Company'}
+        </button>
+
+        {/* Response area */}
+        {researchResult && (
+          <div className="mt-4 rounded-lg border border-secondary-200 bg-white p-4">
+            {researchResult.error ? (
+              <p className="text-sm text-red-600">{researchResult.error}</p>
+            ) : (
+              <>
+                <div className="flex items-center gap-3 mb-3">
+                  <ProviderBadge provider={researchResult.provider} />
+                  <span className="text-xs text-secondary-400">{researchResult.duration_ms}ms</span>
+                  <button
+                    onClick={() => setResearchResult(null)}
+                    className="ml-auto text-xs text-secondary-400 hover:text-secondary-600 underline"
+                  >
+                    Try different LLM
+                  </button>
+                </div>
+                <div className="text-sm text-secondary-700 leading-relaxed whitespace-pre-wrap">
+                  {researchResult.response}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* BOTTOM — Reviewer notes + actions */}
+      <div className="mt-5 pt-4 border-t border-secondary-200">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+          <input
+            type="text"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Add reviewer notes (optional)…"
+            className="flex-1 min-w-0 py-2 px-3 text-sm border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+          />
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => onAction(item.queue_item_id, 'approved', notes)}
+              disabled={isProcessing || item.status === 'approved'}
+              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <CheckCircle className="h-4 w-4" />
+              Approve
+            </button>
+            <button
+              onClick={() => onAction(item.queue_item_id, 'rejected', notes)}
+              disabled={isProcessing || item.status === 'rejected'}
+              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-red-500 rounded-md hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <XCircle className="h-4 w-4" />
+              Reject
+            </button>
+            <button
+              onClick={() => onAction(item.queue_item_id, 'dismissed', notes)}
+              disabled={isProcessing || item.status === 'dismissed'}
+              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-secondary-600 bg-secondary-100 rounded-md hover:bg-secondary-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <MinusCircle className="h-4 w-4" />
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -178,6 +545,7 @@ export default function ReviewQueuePage() {
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [actionLoading, setActionLoading] = useState(null)
   const [actionError, setActionError] = useState(null)
+  const [expandedId, setExpandedId] = useState(null)
 
   const setFilter = useCallback((key, value) => {
     setFilters((prev) => ({ ...prev, [key]: value, page: 1 }))
@@ -211,7 +579,8 @@ export default function ReviewQueuePage() {
   const totalPages = Math.max(1, Math.ceil(total / filters.pageSize))
   const allSelected = items.length > 0 && selectedIds.size === items.length
 
-  async function handleAction(itemId, status) {
+  // notes param is passed from the detail panel; inline buttons omit it
+  async function handleAction(itemId, status, notes = null) {
     setActionLoading(itemId)
     setActionError(null)
     try {
@@ -219,9 +588,13 @@ export default function ReviewQueuePage() {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({
+          status,
+          ...(notes ? { reviewer_notes: notes } : {}),
+        }),
       })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      setExpandedId(null)
       queryClient.invalidateQueries({ queryKey: ['review-queue'] })
       queryClient.invalidateQueries({ queryKey: ['review-queue-stats'] })
     } catch (e) {
@@ -267,6 +640,10 @@ export default function ReviewQueuePage() {
     } else {
       setSelectedIds(new Set(items.map((i) => i.queue_item_id)))
     }
+  }
+
+  function toggleExpand(id) {
+    setExpandedId((prev) => (prev === id ? null : id))
   }
 
   return (
@@ -362,9 +739,7 @@ export default function ReviewQueuePage() {
             {/* Bulk actions — visible only when items are selected */}
             {selectedIds.size > 0 ? (
               <div className="ml-auto flex items-center gap-2">
-                <span className="text-sm text-secondary-600 mr-1">
-                  {selectedIds.size} selected
-                </span>
+                <span className="text-sm text-secondary-600 mr-1">{selectedIds.size} selected</span>
                 <button
                   onClick={() => handleBulkAction('approved')}
                   disabled={actionLoading === 'bulk'}
@@ -383,9 +758,7 @@ export default function ReviewQueuePage() {
                 </button>
               </div>
             ) : (
-              <span className="ml-auto text-sm text-secondary-500">
-                {total.toLocaleString()} items
-              </span>
+              <span className="ml-auto text-sm text-secondary-500">{total.toLocaleString()} items</span>
             )}
           </div>
         </CardContent>
@@ -468,17 +841,25 @@ export default function ReviewQueuePage() {
                   </td>
                 </tr>
               ) : (
-                items.map((item) => {
+                items.flatMap((item) => {
                   const isSelected = selectedIds.has(item.queue_item_id)
                   const isProcessing = actionLoading === item.queue_item_id
-                  return (
+                  const isExpanded = expandedId === item.queue_item_id
+
+                  return [
+                    // Main row — clicking expands; checkbox and actions cells stop propagation
                     <tr
                       key={item.queue_item_id}
-                      className={`border-b border-secondary-100 transition-colors ${
-                        isSelected ? 'bg-primary-50' : 'hover:bg-secondary-50'
+                      onClick={() => toggleExpand(item.queue_item_id)}
+                      className={`border-b border-secondary-100 cursor-pointer transition-colors ${
+                        isExpanded
+                          ? 'bg-primary-50 border-b-0'
+                          : isSelected
+                          ? 'bg-primary-50'
+                          : 'hover:bg-secondary-50'
                       }`}
                     >
-                      <td className="py-3 px-4">
+                      <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={isSelected}
@@ -500,8 +881,8 @@ export default function ReviewQueuePage() {
                           <span className="text-xs text-secondary-400">{item.primary_sector}</span>
                         )}
                       </td>
-                      <td className="py-3 px-3 text-secondary-600 text-xs whitespace-nowrap">
-                        {REASON_LABELS[item.reason] ?? item.reason}
+                      <td className="py-3 px-3">
+                        <ReasonBadge reason={item.reason} />
                       </td>
                       <td className="py-3 px-3">
                         <StatusBadge status={item.status} />
@@ -509,7 +890,7 @@ export default function ReviewQueuePage() {
                       <td className="py-3 px-3 text-secondary-500 text-xs tabular-nums whitespace-nowrap">
                         {formatTimestamp(item.created_at)}
                       </td>
-                      <td className="py-3 px-3">
+                      <td className="py-3 px-3" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => handleAction(item.queue_item_id, 'approved')}
@@ -537,8 +918,21 @@ export default function ReviewQueuePage() {
                           </button>
                         </div>
                       </td>
-                    </tr>
-                  )
+                    </tr>,
+
+                    // Detail panel row — rendered only when this row is expanded
+                    isExpanded && (
+                      <tr key={`${item.queue_item_id}-detail`} className="border-b border-secondary-200">
+                        <td colSpan={7} className="p-0">
+                          <DetailPanel
+                            item={item}
+                            onAction={handleAction}
+                            actionLoading={actionLoading}
+                          />
+                        </td>
+                      </tr>
+                    ),
+                  ].filter(Boolean)
                 })
               )}
             </tbody>

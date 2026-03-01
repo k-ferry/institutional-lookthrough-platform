@@ -1,5 +1,6 @@
 """Review queue API endpoints for approving, rejecting, and dismissing flagged items."""
 
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -11,7 +12,12 @@ from sqlalchemy.orm import Session
 from src.lookthrough.auth.dependencies import get_current_user, get_db
 from src.lookthrough.db.models import (
     DimCompany,
+    DimFund,
+    DimTaxonomyNode,
+    EntityResolutionLog,
     FactAuditEvent,
+    FactExposureClassification,
+    FactFundReport,
     FactReportedHolding,
     FactReviewQueueItem,
     User,
@@ -38,6 +44,14 @@ class BulkStatusUpdateRequest(BaseModel):
     reviewer_notes: Optional[str] = None
 
 
+class ResearchRequest(BaseModel):
+    company_name: str
+    company_id: Optional[str] = None
+    raw_company_name: Optional[str] = None
+    reported_sector: Optional[str] = None
+    provider: str = "claude"  # "claude" | "openai" | "ollama"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -47,6 +61,14 @@ def _item_to_dict(
     item: FactReviewQueueItem,
     company_name: Optional[str],
     primary_sector: Optional[str],
+    *,
+    reported_sector: Optional[str] = None,
+    ai_classification: Optional[dict] = None,
+    match_method: Optional[str] = None,
+    match_confidence: Optional[float] = None,
+    fund_names: Optional[list] = None,
+    holding_count: Optional[int] = None,
+    reported_value_usd: Optional[float] = None,
 ) -> dict:
     return {
         "queue_item_id": item.queue_item_id,
@@ -61,6 +83,14 @@ def _item_to_dict(
         "resolved_at": item.resolved_at,
         "resolved_by": item.resolved_by,
         "primary_sector": primary_sector,
+        # Enriched fields
+        "reported_sector": reported_sector,
+        "ai_classification": ai_classification,
+        "match_method": match_method,
+        "match_confidence": match_confidence,
+        "fund_names": fund_names or [],
+        "holding_count": holding_count,
+        "reported_value_usd": reported_value_usd,
     }
 
 
@@ -93,6 +123,10 @@ def list_queue_items(
     status: pending | approved | rejected | dismissed | all  (default: pending)
     priority: high | medium | low | all  (default: all)
     reason: exact match on reason field (optional)
+
+    Each item includes per-company enrichment: reported_sector, ai_classification,
+    match_method/confidence from entity resolution, fund_names, holding_count,
+    and total reported_value_usd.
     """
     q = (
         db.query(
@@ -133,7 +167,132 @@ def list_queue_items(
         if row.status in counts:
             counts[row.status] = row.cnt
 
-    items = [_item_to_dict(item, cname, csector) for item, cname, csector in rows]
+    # -----------------------------------------------------------------------
+    # Per-company enrichment — 5 batched secondary queries for the current page
+    # -----------------------------------------------------------------------
+    company_ids = [item.company_id for item, _, _ in rows if item.company_id is not None]
+
+    holdings_map: dict[str, dict] = {}
+    sector_map: dict[str, str] = {}
+    funds_map: dict[str, list] = {}
+    classif_map: dict[str, dict] = {}
+    er_map: dict[str, dict] = {}
+
+    if company_ids:
+        # Holdings count and total value per company
+        for r in (
+            db.query(
+                FactReportedHolding.company_id,
+                func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+                func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            )
+            .filter(FactReportedHolding.company_id.in_(company_ids))
+            .group_by(FactReportedHolding.company_id)
+            .all()
+        ):
+            holdings_map[str(r.company_id)] = {
+                "holding_count": r.holding_count,
+                "reported_value_usd": float(r.total_value) if r.total_value is not None else None,
+            }
+
+        # Most common reported_sector per company
+        sector_best: dict[str, tuple] = {}
+        for r in (
+            db.query(
+                FactReportedHolding.company_id,
+                FactReportedHolding.reported_sector,
+                func.count(FactReportedHolding.reported_holding_id).label("cnt"),
+            )
+            .filter(
+                FactReportedHolding.company_id.in_(company_ids),
+                FactReportedHolding.reported_sector.isnot(None),
+            )
+            .group_by(FactReportedHolding.company_id, FactReportedHolding.reported_sector)
+            .all()
+        ):
+            cid = str(r.company_id)
+            if cid not in sector_best or r.cnt > sector_best[cid][1]:
+                sector_best[cid] = (r.reported_sector, r.cnt)
+        sector_map = {cid: v[0] for cid, v in sector_best.items()}
+
+        # Fund names per company (distinct)
+        for r in (
+            db.query(FactReportedHolding.company_id, DimFund.fund_name)
+            .distinct()
+            .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+            .join(DimFund, FactFundReport.fund_id == DimFund.fund_id)
+            .filter(FactReportedHolding.company_id.in_(company_ids))
+            .all()
+        ):
+            funds_map.setdefault(str(r.company_id), []).append(r.fund_name)
+
+        # Best AI industry classification per company (highest confidence first)
+        for classif, node_name in (
+            db.query(FactExposureClassification, DimTaxonomyNode.node_name)
+            .outerjoin(
+                DimTaxonomyNode,
+                FactExposureClassification.taxonomy_node_id == DimTaxonomyNode.taxonomy_node_id,
+            )
+            .filter(
+                FactExposureClassification.company_id.in_(company_ids),
+                FactExposureClassification.taxonomy_type == "industry",
+            )
+            .order_by(FactExposureClassification.confidence.desc())
+            .all()
+        ):
+            cid = str(classif.company_id)
+            if cid not in classif_map:
+                classif_map[cid] = {
+                    "taxonomy_node_id": classif.taxonomy_node_id,
+                    "node_name": node_name,
+                    "confidence": float(classif.confidence) if classif.confidence is not None else None,
+                    "rationale": classif.rationale,
+                    "model": classif.model,
+                }
+
+        # Entity resolution: first known match method per company
+        for r in (
+            db.query(
+                EntityResolutionLog.matched_company_id,
+                EntityResolutionLog.match_method,
+                EntityResolutionLog.match_confidence,
+            )
+            .filter(
+                EntityResolutionLog.matched_company_id.in_(company_ids),
+                EntityResolutionLog.match_method.isnot(None),
+            )
+            .all()
+        ):
+            cid = str(r.matched_company_id)
+            if cid not in er_map:
+                er_map[cid] = {
+                    "match_method": r.match_method,
+                    "match_confidence": (
+                        float(r.match_confidence) if r.match_confidence is not None else None
+                    ),
+                }
+
+    # Build final item list with enrichment merged in
+    items = []
+    for item, company_name, primary_sector in rows:
+        cid = str(item.company_id) if item.company_id else None
+        h = holdings_map.get(cid, {}) if cid else {}
+        er = er_map.get(cid, {}) if cid else {}
+        items.append(
+            _item_to_dict(
+                item,
+                company_name,
+                primary_sector,
+                reported_sector=sector_map.get(cid) if cid else None,
+                ai_classification=classif_map.get(cid) if cid else None,
+                match_method=er.get("match_method"),
+                match_confidence=er.get("match_confidence"),
+                fund_names=funds_map.get(cid, []) if cid else [],
+                holding_count=h.get("holding_count"),
+                reported_value_usd=h.get("reported_value_usd"),
+            )
+        )
+
     return {"items": items, "total": total, "counts": counts}
 
 
@@ -249,6 +408,120 @@ def bulk_update_queue_items(
     )
     db.commit()
     return {"updated": updated}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/review-queue/research
+# ---------------------------------------------------------------------------
+
+
+@router.post("/research")
+def research_company(
+    body: ResearchRequest,
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Research a company using a selected LLM to aid manual classification.
+
+    Returns {response, provider, model, duration_ms} on success or {error} on failure.
+    Provider must be one of: claude, openai, ollama.
+    """
+    prompt = (
+        "You are a financial analyst assistant. Research this company and provide a brief classification summary.\n"
+        f"Company name: {body.company_name}\n"
+        f"Raw name from filing: {body.raw_company_name or 'N/A'}\n"
+        f"Reported sector: {body.reported_sector or 'Not provided'}\n\n"
+        "Please provide:\n"
+        "1. What this company does (2-3 sentences)\n"
+        "2. Most likely GICS sector and industry classification with reasoning\n"
+        "3. Confidence level (high/medium/low) and why\n"
+        "4. Any notes that would help an analyst classify this company\n\n"
+        "Be concise. If you don't have reliable information about this specific company, "
+        "say so clearly rather than guessing."
+    )
+
+    start = time.monotonic()
+
+    if body.provider == "claude":
+        try:
+            import anthropic
+        except ImportError:
+            return {"error": "Anthropic SDK not installed. Run: pip install anthropic"}
+        try:
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(
+                block.text for block in response.content if hasattr(block, "text")
+            )
+            duration_ms = int((time.monotonic() - start) * 1000)
+            return {
+                "response": text,
+                "provider": "claude",
+                "model": "claude-sonnet-4-20250514",
+                "duration_ms": duration_ms,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    elif body.provider == "openai":
+        try:
+            from openai import OpenAI
+        except ImportError:
+            return {"error": "OpenAI SDK not installed. Run: pip install openai"}
+        try:
+            client = OpenAI()
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.choices[0].message.content or ""
+            duration_ms = int((time.monotonic() - start) * 1000)
+            return {
+                "response": text,
+                "provider": "openai",
+                "model": "gpt-4o",
+                "duration_ms": duration_ms,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    elif body.provider == "ollama":
+        try:
+            import requests as _requests
+        except ImportError:
+            return {"error": "requests library not installed. Run: pip install requests"}
+        try:
+            resp = _requests.post(
+                "http://localhost:11434/api/chat",
+                json={
+                    "model": "llama3.1",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = data.get("message", {}).get("content", "")
+            duration_ms = int((time.monotonic() - start) * 1000)
+            return {
+                "response": text,
+                "provider": "ollama",
+                "model": "llama3.1",
+                "duration_ms": duration_ms,
+            }
+        except Exception as e:
+            err = str(e)
+            if "Connection" in err or "connect" in err.lower():
+                return {"error": "Cannot connect to Ollama. Is it running at localhost:11434?"}
+            return {"error": err}
+
+    else:
+        return {"error": f"Unknown provider '{body.provider}'. Must be: claude, openai, or ollama."}
 
 
 # ---------------------------------------------------------------------------
