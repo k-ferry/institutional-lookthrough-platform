@@ -201,4 +201,20 @@ Connecting the AI classification and GICS mapping side pipelines into the main P
 **Running overnight:**
 - `python run_pipeline.py --classify --limit 9999` — will classify remaining ~1,294 companies
 
+### 2026-03-01 — Session 3
+
+**What was built:**
+- Review Queue detail panel — expandable row with company context, AI classification display, entity resolution method/confidence
+- Fixed zero UUID display — shows "Could not classify" instead of 00000000...
+- AI company research feature — LLM selector (Claude/GPT-4o/Ollama), research prompt, response panel with provider badge and response time
+- Ollama/Llama3.1 installed locally (free, 4.9GB) and wired to research endpoint
+- OpenAI GPT-4o connected via API key
+- Fixed Ollama timeout (300s), shorter prompt for local model, UX loading message
+
+**Key decisions:**
+- User selects LLM per research call rather than calling all three simultaneously — more efficient, gives user control
+- Ollama runs locally — free, no API cost, data never leaves machine
+- Shorter prompt for Ollama to compensate for slower local inference
+
 **Next session:** Phase 8 — Front Office polish (geography exposure, fund detail page, company detail page)
+
