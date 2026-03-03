@@ -6,6 +6,8 @@ import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import HoldingsPage from './pages/HoldingsPage'
 import AgentPage from './pages/AgentPage'
+import FundDetailPage from './pages/FundDetailPage'
+import CompanyDetailPage from './pages/CompanyDetailPage'
 import ReviewQueuePage from './pages/ops/ReviewQueuePage'
 import AuditTrailPage from './pages/ops/AuditTrailPage'
 import PipelineMonitorPage from './pages/ops/PipelineMonitorPage'
@@ -56,6 +58,8 @@ function AppRoutes() {
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/holdings" element={<HoldingsPage />} />
         <Route path="/funds" element={<DashboardPage />} />
+        <Route path="/funds/:fund_id" element={<FundDetailPage />} />
+        <Route path="/companies/:company_id" element={<CompanyDetailPage />} />
         <Route path="/agent" element={<AgentPage />} />
         <Route path="/settings" element={<DashboardPage />} />
         <Route path="/ops/review-queue" element={<ReviewQueuePage />} />

@@ -52,12 +52,14 @@ def list_holdings(
     query = (
         db.query(
             FactReportedHolding.reported_holding_id,
+            FactReportedHolding.company_id,
             company_name_col.label("company_name"),
             DimFund.fund_id,
             DimFund.fund_name,
             sector_col.label("sector"),
             country_col.label("country"),
             FactReportedHolding.reported_value_usd,
+            FactReportedHolding.extraction_confidence,
             FactReportedHolding.as_of_date,
             FactReportedHolding.source,
         )
@@ -86,6 +88,7 @@ def list_holdings(
     items = [
         {
             "holding_id": row.reported_holding_id,
+            "company_id": row.company_id,
             "company_name": row.company_name,
             "fund_id": row.fund_id,
             "fund_name": row.fund_name,
@@ -94,6 +97,11 @@ def list_holdings(
             "reported_value": (
                 float(row.reported_value_usd)
                 if row.reported_value_usd is not None
+                else None
+            ),
+            "extraction_confidence": (
+                float(row.extraction_confidence)
+                if row.extraction_confidence is not None
                 else None
             ),
             "date_reported": row.as_of_date,

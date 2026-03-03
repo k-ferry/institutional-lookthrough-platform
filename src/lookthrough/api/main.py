@@ -27,7 +27,7 @@ from src.lookthrough.agent.tools import (
     get_sector_exposure,
 )
 from src.lookthrough.api.routes.agent import router as agent_router
-from src.lookthrough.api.routes.dashboard import router as dashboard_router
+from src.lookthrough.api.routes.dashboard import companies_router, funds_router, router as dashboard_router
 from src.lookthrough.api.routes.holdings import router as holdings_router
 from src.lookthrough.api.routes.review_queue import (
     audit_router,
@@ -55,6 +55,8 @@ app.add_middleware(
 # Register routers
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+app.include_router(funds_router)
+app.include_router(companies_router)
 app.include_router(holdings_router)
 app.include_router(agent_router)
 app.include_router(review_queue_router)

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import {
   Search,
   X,
@@ -388,19 +389,34 @@ export default function HoldingsPage() {
                   >
                     {/* Company */}
                     <td className="py-3 px-4 max-w-[200px]">
-                      <span
-                        className="font-semibold text-primary-700 truncate block"
-                        title={row.company_name ?? '—'}
-                      >
-                        {row.company_name ?? '—'}
-                      </span>
+                      {row.company_id ? (
+                        <Link
+                          to={`/companies/${row.company_id}`}
+                          className="font-semibold text-primary-700 hover:text-primary-900 hover:underline truncate block"
+                          title={row.company_name ?? '—'}
+                        >
+                          {row.company_name ?? '—'}
+                        </Link>
+                      ) : (
+                        <span className="font-semibold text-primary-700 truncate block" title={row.company_name ?? '—'}>
+                          {row.company_name ?? '—'}
+                        </span>
+                      )}
                     </td>
 
                     {/* Fund */}
-                    <td className="py-3 px-4 text-secondary-600 max-w-[160px]">
-                      <span className="truncate block" title={row.fund_name ?? '—'}>
-                        {row.fund_name ?? '—'}
-                      </span>
+                    <td className="py-3 px-4 max-w-[160px]">
+                      {row.fund_id ? (
+                        <Link
+                          to={`/funds/${row.fund_id}`}
+                          className="text-secondary-600 hover:text-primary-700 hover:underline truncate block"
+                          title={row.fund_name ?? '—'}
+                        >
+                          {row.fund_name ?? '—'}
+                        </Link>
+                      ) : (
+                        <span className="text-secondary-600 truncate block">{row.fund_name ?? '—'}</span>
+                      )}
                     </td>
 
                     {/* Sector pill */}
