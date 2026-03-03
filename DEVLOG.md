@@ -167,6 +167,10 @@ Connecting the AI classification and GICS mapping side pipelines into the main P
 | `total_exposure_p10` / `p90` are always null | Confidence intervals not computed in V1 aggregation | Future |
 | `fact_aggregation_snapshot` not used by any API | Computed every run but no endpoint queries it; dashboards use raw holding queries instead | Phase 8 |
 
+**Time-series exposure tracking** — fact_aggregation_snapshot should accumulate 
+monthly snapshots rather than overwrite. Enables exposure drift analysis, 
+concentration trend charts, and quarter-over-quarter comparison. 
+Add to Phase 8/9 roadmap.
 ---
 
 ## Session Log
@@ -217,4 +221,25 @@ Connecting the AI classification and GICS mapping side pipelines into the main P
 - Shorter prompt for Ollama to compensate for slower local inference
 
 **Next session:** Phase 8 — Front Office polish (geography exposure, fund detail page, company detail page)
+
+### 2026-03-01 — Session 4
+
+**What was built:**
+- Fund Detail page — header with fund metadata, 4 stat cards, sector bar chart, top 10 holdings table, full paginated holdings table pre-filtered to fund
+- Clickable fund names throughout app (dashboard fund table, holdings explorer) linking to /funds/:fund_id
+- GICS write-back architectural fix — now runs after entity resolution and company consolidation, filters to bdc_filing source only, updates 1,088 rows per pipeline run
+- Classifications now survive pipeline reruns without calling the API again
+- Notion project tracker created and imported
+- Pipeline order documented: Load Sources → Entity Resolution → Company Consolidation → GICS Write-back → Exposure Inference
+
+**Key decisions:**
+- GICS write-back only overwrites bdc_filing companies, never synthetic
+- Write-back runs after consolidation so company_id is fully resolved first
+- Production pipeline will be incremental (Phase 9) — current full-rebuild is development mode only
+- Monthly exposure snapshots added to roadmap for time-series analysis
+
+**Known issue identified:**
+- fact_aggregation_snapshot overwrites on each run — needs append mode for time-series history (Phase 8/9)
+
+**Next session:** Company Detail page, geography exposure, export functionality
 

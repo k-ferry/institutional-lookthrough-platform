@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import {
   BarChart,
   Bar,
@@ -169,8 +170,14 @@ function FundTable({ funds }) {
         <tbody>
           {funds.map((f) => (
             <tr key={f.fund_id} className="border-b border-secondary-100 hover:bg-secondary-50 transition-colors">
-              <td className="py-2 px-1 text-secondary-800 font-medium max-w-[180px] truncate">
-                {f.fund_name}
+              <td className="py-2 px-1 max-w-[180px] truncate">
+                <Link
+                  to={`/funds/${f.fund_id}`}
+                  className="font-medium text-primary-700 hover:text-primary-900 hover:underline truncate block"
+                  title={f.fund_name}
+                >
+                  {f.fund_name}
+                </Link>
               </td>
               <td className="py-2 px-1 text-right text-secondary-600 tabular-nums">
                 {formatNumber(f.holding_count ?? 0)}
