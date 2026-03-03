@@ -404,13 +404,24 @@ def get_company_detail(
         }
 
     # ---- Entity resolution log ----
-    resolution_rows = (
-        db.query(EntityResolutionLog)
-        .filter(EntityResolutionLog.matched_company_id == company_id)
+    # entity_resolution_log is keyed by reported_holding_id, not company_id.
+    # Step 1: collect all holding IDs for this company.
+    holding_id_rows = (
+        db.query(FactReportedHolding.reported_holding_id)
+        .filter(FactReportedHolding.company_id == company_id)
         .all()
     )
-    raw_names = list({r.raw_company_name for r in resolution_rows if r.raw_company_name})
-    methods = list({r.match_method for r in resolution_rows if r.match_method})
+    holding_ids = [r.reported_holding_id for r in holding_id_rows]
+    # Step 2: look up resolution records by those holding IDs.
+    resolution_rows = []
+    if holding_ids:
+        resolution_rows = (
+            db.query(EntityResolutionLog)
+            .filter(EntityResolutionLog.reported_holding_id.in_(holding_ids))
+            .all()
+        )
+    raw_names = sorted({r.raw_company_name for r in resolution_rows if r.raw_company_name})
+    methods = sorted({r.match_method for r in resolution_rows if r.match_method})
     confidences = [r.match_confidence for r in resolution_rows if r.match_confidence is not None]
     avg_confidence = sum(confidences) / len(confidences) if confidences else None
     resolution = {

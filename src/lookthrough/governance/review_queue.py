@@ -28,6 +28,7 @@ from src.lookthrough.db.repository import (
     get_all,
 )
 from src.lookthrough.db.models import (
+    DimCompany,
     EntityResolutionLog,
     FactExposureClassification,
     FactInferredExposure,
@@ -77,6 +78,7 @@ def generate_review_queue(csv_mode: bool = False) -> pd.DataFrame:
     """
     root = _repo_root()
     gold = root / "data" / "gold"
+    silver = root / "data" / "silver"
     gold.mkdir(parents=True, exist_ok=True)
 
     # Load source data from DB or CSV
@@ -84,10 +86,12 @@ def generate_review_queue(csv_mode: bool = False) -> pd.DataFrame:
         classifications = _read_csv(gold / "fact_exposure_classification.csv")
         entity_log = _read_csv(gold / "entity_resolution_log.csv")
         exposures = _read_csv(gold / "fact_inferred_exposure.csv")
+        dim_company = _read_csv(silver / "dim_company.csv")
     else:
         classifications = get_all(FactExposureClassification)
         entity_log = get_all(EntityResolutionLog)
         exposures = get_all(FactInferredExposure)
+        dim_company = get_all(DimCompany)
 
     queue_items: list[dict] = []
     created_at = datetime.now(timezone.utc).isoformat()
@@ -171,6 +175,44 @@ def generate_review_queue(csv_mode: bool = False) -> pd.DataFrame:
                     "company_id": row.get("company_id") if pd.notna(row.get("company_id")) else None,
                     "raw_company_name": str(row.get("raw_company_name", "")) if pd.notna(row.get("raw_company_name")) else None,
                     "reason": "large_unknown_exposure",
+                    "priority": "medium",
+                    "status": "pending",
+                    "created_at": created_at,
+                })
+
+    # Condition E: Companies with null primary_sector, no AI classification, and total exposure > $500K
+    if not dim_company.empty and "primary_sector" in dim_company.columns:
+        # Companies with no primary_sector
+        unclassified = dim_company[
+            dim_company["primary_sector"].isna() |
+            (dim_company["primary_sector"].astype(str).str.strip() == "")
+        ].copy()
+
+        # Exclude companies that already have an AI classification entry
+        if not classifications.empty and "company_id" in classifications.columns:
+            classified_ids = set(classifications["company_id"].dropna().tolist())
+            unclassified = unclassified[~unclassified["company_id"].isin(classified_ids)]
+
+        # Join with exposures to get total exposure per company
+        if not unclassified.empty and not exposures.empty and "company_id" in exposures.columns:
+            company_totals = (
+                exposures.groupby("company_id")["exposure_value_usd"]
+                .sum()
+                .reset_index()
+                .rename(columns={"exposure_value_usd": "total_exposure"})
+            )
+            merged = unclassified.merge(company_totals, on="company_id", how="inner")
+            significant = merged[merged["total_exposure"] > 500_000]
+
+            for _, row in significant.iterrows():
+                queue_items.append({
+                    "queue_item_id": str(uuid.uuid4()),
+                    "run_id": "",
+                    "exposure_id": None,
+                    "reported_holding_id": None,
+                    "company_id": str(row["company_id"]) if pd.notna(row.get("company_id")) else None,
+                    "raw_company_name": str(row.get("company_name", "")) if pd.notna(row.get("company_name")) else None,
+                    "reason": "unclassified_company_no_sector",
                     "priority": "medium",
                     "status": "pending",
                     "created_at": created_at,
