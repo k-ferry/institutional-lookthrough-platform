@@ -312,8 +312,8 @@ def _update_dim_company_from_gics(
 
     company_update_records = []
     for _, company in all_companies.iterrows():
-        # Only update companies that have no primary_sector yet
-        if pd.notna(company.get("primary_sector")) and str(company.get("primary_sector", "")).strip():
+        # Only update BDC-sourced companies — synthetic companies have correct sectors from generate.py
+        if company.get("source") != "bdc_filing":
             continue
 
         cid = str(company["company_id"])

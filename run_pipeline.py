@@ -32,11 +32,6 @@ STEPS = [
         'always': True,
     },
     {
-        'name': 'GICS Write-back',
-        'cmd': [sys.executable, '-m', 'src.lookthrough.ai.gics_writeback'],
-        'always': True,
-    },
-    {
         'name': 'Entity Resolution',
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.entity_resolution'],
         'always': True,
@@ -44,6 +39,11 @@ STEPS = [
     {
         'name': 'Company Consolidation',
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.entity_resolution', '--consolidate'],
+        'always': True,
+    },
+    {
+        'name': 'GICS Write-back',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.ai.gics_writeback'],
         'always': True,
     },
     {
