@@ -130,12 +130,7 @@ cd frontend && npm install && npm run dev
 
 ### 7. Open the app
 
-Navigate to **http://localhost:3000** and log in with:
-
-```
-Email:    admin@lookthrough.com
-Password: admin123
-```
+Navigate to **http://localhost:3000** and log in with the admin credentials created by `python -m src.lookthrough.auth.seed`. See DEVLOG.md for development credentials (not committed to public branches).
 
 ---
 

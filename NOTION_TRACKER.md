@@ -84,7 +84,7 @@
 - [x] `/auth/register` — creates new user
 - [x] bcrypt password hashing (direct, not passlib — compatibility fix)
 - [x] `get_current_user` FastAPI dependency injected on all protected routes
-- [x] Admin seed script (`auth/seed.py`) — creates `admin@lookthrough.com / admin123`
+- [x] Admin seed script (`auth/seed.py`) — creates `admin@lookthrough.com / <see DEVLOG>`
 
 ### Phase 2 — Frontend Scaffold
 
@@ -236,7 +236,7 @@ http://localhost:3000
 
 # 5. Login
 # Email:    admin@lookthrough.com
-# Password: admin123
+# Password: <see DEVLOG>
 ```
 
 **To run the full pipeline (re-ingest + re-classify):**
@@ -261,7 +261,7 @@ python run_pipeline.py --csv
 | Secret | Value |
 |---|---|
 | **Database URL** | `postgresql://lookthrough:lookthrough@localhost:5432/lookthrough` |
-| **Admin login** | `admin@lookthrough.com` / `admin123` |
+| **Admin login** | `admin@lookthrough.com` / `<see DEVLOG>` |
 | **JWT secret** | Set via `JWT_SECRET_KEY` environment variable |
 | **Anthropic API key** | Set via `ANTHROPIC_API_KEY` environment variable |
 | **OpenAI API key** | Set via `OPENAI_API_KEY` environment variable |
