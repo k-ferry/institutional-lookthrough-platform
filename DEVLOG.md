@@ -110,9 +110,9 @@ Key decisions already made and locked in. Do not change these without recording 
 
 Connecting the AI classification and GICS mapping side pipelines into the main PostgreSQL workflow.
 
-- [ ] Connect `ai/classify_companies.py` to read/write PostgreSQL (currently CSV only)
-- [ ] Write GICS mappings from `gics_mapping` table back to `dim_company.primary_industry` and `industry_taxonomy_node_id`
-- [ ] Add approve/reject/dismiss workflow to `fact_review_queue_item` (status updates beyond "pending")
+- [x] Connect `ai/classify_companies.py` to read/write PostgreSQL (currently CSV only)
+- [x] Write GICS mappings from `gics_mapping` table back to `dim_company.primary_industry` and `industry_taxonomy_node_id`
+- [x] Add approve/reject/dismiss workflow to `fact_review_queue_item` (status updates beyond "pending")
 - [ ] Add API endpoints for review queue CRUD
 
 ---
@@ -126,7 +126,7 @@ Connecting the AI classification and GICS mapping side pipelines into the main P
 - Add review queue approve / reject / snooze workflow (PATCH endpoint + status transitions)
 - Add review queue API endpoints: `GET /api/review-queue`, `PATCH /api/review-queue/:id`
 
-### Phase 7 — Ops Interface *(Data Science course deliverable)*
+### Phase 7 — Ops Interface 
 
 - Review Queue UI — table with priority badges, reason tags, approve/reject/snooze actions
 - Audit Trail UI — filterable event log with actor, action, entity, timestamp, payload
@@ -134,7 +134,7 @@ Connecting the AI classification and GICS mapping side pipelines into the main P
 - Pipeline Run Monitor — run history, step durations, pass/fail status, coverage stats per run
 - Classification Manager — view AI classifications, confidence scores, override incorrect labels
 
-### Phase 8 — Front Office Polish *(Capstone deliverable)*
+### Phase 8 — Front Office Polish
 
 - Geography exposure page — world map or table view, country-level rollup (requires fixing country data gap first)
 - Fund detail page — click-through from dashboard fund table → holdings list, sector breakdown, time series
@@ -243,3 +243,18 @@ Add to Phase 8/9 roadmap.
 
 **Next session:** Company Detail page, geography exposure, export functionality
 
+### 2026-03-03 — Session 5
+
+**What was built:**
+- Company Detail page — GICS classification card, entity resolution card with aliases, fund exposure table, holdings history, audit events
+- Entity resolution lookup fixed — now correctly queries via reported_holding_id join
+- Review queue condition E — unclassified companies with >$500K exposure, added 58 new items (73 → 131 total)
+- Clickable company names throughout app linking to /companies/:company_id
+- GICS write-back order fixed — runs after entity resolution, filters to bdc_filing source
+
+**Key numbers:**
+- 131 review queue items (up from 73)
+- Entity resolution showing correctly in company detail
+- Classification working across 3 paths: synthetic, GICS mapping, per-company AI
+
+**Next session:** Geography exposure page, GICS drill-down, export functionality
