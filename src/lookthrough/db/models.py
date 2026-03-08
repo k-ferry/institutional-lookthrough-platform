@@ -210,16 +210,33 @@ class FactExposureClassification(Base):
 
 
 class FactAggregationSnapshot(Base):
-    """BI-optimized rollups for dashboards and fast queries."""
+    """BI-optimized rollups for dashboards and fast queries.
+
+    Supports time-series accumulation: each pipeline run appends a new snapshot
+    instead of replacing existing data.  is_latest=True marks the most recent run.
+    fund_id='' (empty string) indicates a portfolio-level aggregate; a UUID
+    indicates a fund-scoped aggregate.
+
+    Primary key: (snapshot_id, portfolio_id, fund_id, taxonomy_type, taxonomy_node_id)
+    run_id and as_of_date are data columns retained for lineage.
+    """
 
     __tablename__ = "fact_aggregation_snapshot"
 
-    # Composite primary key
-    run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # Composite primary key (time-series aware)
+    snapshot_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     portfolio_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    as_of_date: Mapped[str] = mapped_column(String(20), primary_key=True)
+    fund_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     taxonomy_type: Mapped[str] = mapped_column(String(50), primary_key=True)
     taxonomy_node_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+
+    # Data / lineage columns (no longer part of PK)
+    run_id: Mapped[str] = mapped_column(String(36))
+    as_of_date: Mapped[str] = mapped_column(String(20))
+    snapshot_date: Mapped[str] = mapped_column(String(10))
+    is_latest: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Metrics
     total_exposure_value_usd: Mapped[float] = mapped_column(Float)
     total_exposure_p10: Mapped[float] = mapped_column(Float, nullable=True)
     total_exposure_p90: Mapped[float] = mapped_column(Float, nullable=True)

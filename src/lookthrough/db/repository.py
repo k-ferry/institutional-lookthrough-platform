@@ -226,6 +226,30 @@ def execute_query(sql: str, params: dict[str, Any] | None = None) -> pd.DataFram
         return pd.DataFrame(rows, columns=list(columns))
 
 
+def execute_update(sql: str, params: dict[str, Any] | None = None) -> int:
+    """
+    Run a DML statement (UPDATE / DELETE) and commit. Returns rowcount.
+
+    Use this for statements that modify data but don't return rows.
+
+    Args:
+        sql: Raw SQL DML string (UPDATE / DELETE)
+        params: Optional dict of named parameters
+
+    Returns:
+        Number of rows affected
+
+    Example:
+        n = execute_update(
+            "UPDATE fact_aggregation_snapshot SET is_latest = FALSE WHERE is_latest = TRUE"
+        )
+    """
+    with get_session_context() as session:
+        result = session.execute(text(sql), params or {})
+        session.commit()
+        return result.rowcount
+
+
 def dataframe_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     """
     Convert a DataFrame to a list of dicts suitable for upsert/insert.
@@ -260,6 +284,7 @@ __all__ = [
     'bulk_insert',
     'delete_all',
     'execute_query',
+    'execute_update',
     'dataframe_to_records',
     'ensure_tables',
     '_is_csv_mode',

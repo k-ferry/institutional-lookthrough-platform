@@ -1,8 +1,12 @@
 """Dashboard API endpoints returning aggregated portfolio statistics."""
 
+import csv
+import io
 import math
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
@@ -10,13 +14,17 @@ from src.lookthrough.auth.dependencies import get_current_user, get_db
 from src.lookthrough.db.models import (
     DimCompany,
     DimFund,
+    DimTaxonomyNode,
     EntityResolutionLog,
+    FactAggregationSnapshot,
     FactAuditEvent,
     FactExposureClassification,
     FactFundReport,
     FactReportedHolding,
     User,
 )
+
+UNKNOWN_NODE_ID = "00000000-0000-0000-0000-000000000000"
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -144,25 +152,40 @@ def get_fund_breakdown(
 
 # ---------------------------------------------------------------------------
 # GET /api/dashboard/geography-breakdown
+# GET /api/dashboard/geography-breakdown/fund/{fund_id}
 # ---------------------------------------------------------------------------
 
+def _geography_rows(db: Session, fund_id: str | None = None) -> dict:
+    """Shared query for geography breakdown, optionally filtered to one fund."""
+    country_col = func.coalesce(
+        DimCompany.primary_country,
+        FactReportedHolding.reported_country,
+        "Unknown",
+    )
 
-@router.get("/geography-breakdown")
-def get_geography_breakdown(
-    db: Session = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
-) -> dict:
-    """Return exposure breakdown by country/geography."""
-    rows = (
+    total_holdings = db.query(
+        func.count(FactReportedHolding.reported_holding_id)
+    )
+    q = (
         db.query(
-            func.coalesce(DimCompany.primary_country, "Unknown").label("geography"),
+            country_col.label("geography"),
             func.count(distinct(DimCompany.company_id)).label("company_count"),
             func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
             func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
         )
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .group_by(func.coalesce(DimCompany.primary_country, "Unknown"))
-        .order_by(func.sum(FactReportedHolding.reported_value_usd).desc())
+    )
+    if fund_id:
+        q = q.join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        q = q.filter(FactFundReport.fund_id == fund_id)
+        total_holdings = total_holdings.join(
+            FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id
+        ).filter(FactFundReport.fund_id == fund_id)
+
+    total = total_holdings.scalar() or 1
+    rows = (
+        q.group_by(country_col)
+        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
         .all()
     )
 
@@ -171,12 +194,168 @@ def get_geography_breakdown(
             "geography": row.geography,
             "company_count": row.company_count,
             "holding_count": row.holding_count,
-            "total_value": float(row.total_value or 0),
+            "total_value": float(row.total_value) if row.total_value is not None else None,
+            "percentage": round(row.holding_count / total * 100, 2),
         }
         for row in rows
     ]
+    return {"geographies": geographies, "total_holdings": total}
 
-    return {"geographies": geographies}
+
+@router.get("/geography-breakdown")
+def get_geography_breakdown(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Return exposure breakdown by country/geography across all holdings."""
+    return _geography_rows(db)
+
+
+@router.get("/geography-breakdown/fund/{fund_id}")
+def get_geography_breakdown_by_fund(
+    fund_id: str,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Return exposure breakdown by country/geography for a specific fund."""
+    return _geography_rows(db, fund_id=fund_id)
+
+
+# ===========================================================================
+# Exposure Trend  —  GET /api/dashboard/exposure-trend
+#                    GET /api/dashboard/exposure-trend/fund/{fund_id}
+# ===========================================================================
+
+
+def _date_to_quarter(date_str: str) -> str:
+    """Convert a YYYY-MM-DD string to a human-readable quarter label."""
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    q = (d.month - 1) // 3 + 1
+    return f"Q{q} {d.year}"
+
+
+def _build_trend_response(
+    db: Session,
+    dimension_type: str,
+    periods: int,
+    fund_id: str,
+) -> dict:
+    """Shared query logic for portfolio- and fund-scoped trend endpoints."""
+    # Fetch last `periods` distinct snapshot dates for this fund_id / taxonomy_type
+    date_rows = (
+        db.query(FactAggregationSnapshot.snapshot_date)
+        .filter(
+            FactAggregationSnapshot.fund_id == fund_id,
+            FactAggregationSnapshot.taxonomy_type == dimension_type,
+        )
+        .distinct()
+        .order_by(FactAggregationSnapshot.snapshot_date.desc())
+        .limit(periods)
+        .all()
+    )
+    date_list = sorted([r[0] for r in date_rows])
+
+    if not date_list:
+        return {"dates": [], "series": []}
+
+    # Aggregate exposure by (snapshot_date, node_name) across the chosen dates
+    rows = (
+        db.query(
+            FactAggregationSnapshot.snapshot_date,
+            DimTaxonomyNode.node_name,
+            func.sum(FactAggregationSnapshot.total_exposure_value_usd).label("value"),
+        )
+        .join(
+            DimTaxonomyNode,
+            FactAggregationSnapshot.taxonomy_node_id == DimTaxonomyNode.taxonomy_node_id,
+        )
+        .filter(
+            FactAggregationSnapshot.fund_id == fund_id,
+            FactAggregationSnapshot.taxonomy_type == dimension_type,
+            FactAggregationSnapshot.taxonomy_node_id != UNKNOWN_NODE_ID,
+            FactAggregationSnapshot.snapshot_date.in_(date_list),
+        )
+        .group_by(
+            FactAggregationSnapshot.snapshot_date,
+            DimTaxonomyNode.node_name,
+        )
+        .order_by(FactAggregationSnapshot.snapshot_date)
+        .all()
+    )
+
+    # Build lookup: date_totals and name -> {date: value}
+    date_totals: dict[str, float] = {}
+    name_date_value: dict[str, dict[str, float]] = {}
+    for snap_date, name, value in rows:
+        v = float(value) if value is not None else 0.0
+        date_totals[snap_date] = date_totals.get(snap_date, 0.0) + v
+        if name not in name_date_value:
+            name_date_value[name] = {}
+        name_date_value[name][snap_date] = v
+
+    # Compute per-name average % across all dates
+    name_avg: dict[str, float] = {}
+    for name, date_vals in name_date_value.items():
+        pcts = []
+        for d in date_list:
+            total = date_totals.get(d, 1.0) or 1.0
+            pcts.append(date_vals.get(d, 0.0) / total * 100)
+        name_avg[name] = sum(pcts) / len(pcts) if pcts else 0.0
+
+    # Top 6 by average allocation; remainder → "Other"
+    sorted_names = sorted(name_avg, key=lambda n: name_avg[n], reverse=True)
+    top6 = sorted_names[:6]
+    others = sorted_names[6:]
+
+    series: list[dict] = []
+    for name in top6:
+        data = []
+        for d in date_list:
+            total = date_totals.get(d, 1.0) or 1.0
+            pct = name_date_value.get(name, {}).get(d, 0.0) / total * 100
+            data.append(round(pct, 2))
+        series.append({"name": name, "data": data})
+
+    if others:
+        other_data = []
+        for d in date_list:
+            total = date_totals.get(d, 1.0) or 1.0
+            other_val = sum(
+                name_date_value.get(n, {}).get(d, 0.0) for n in others
+            )
+            other_data.append(round(other_val / total * 100, 2))
+        series.append({"name": "Other", "data": other_data})
+
+    quarters = [_date_to_quarter(d) for d in date_list]
+    return {"dates": quarters, "series": series}
+
+
+@router.get("/exposure-trend")
+def get_exposure_trend(
+    dimension_type: str = "sector",
+    periods: int = 8,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Portfolio-level exposure trend over time.
+
+    Returns percentage allocations per taxonomy node across historical snapshots.
+    dimension_type: 'sector' | 'geography' | 'industry'
+    periods: number of most-recent snapshots to include (default 8)
+    """
+    return _build_trend_response(db, dimension_type, periods, fund_id="")
+
+
+@router.get("/exposure-trend/fund/{fund_id}")
+def get_exposure_trend_by_fund(
+    fund_id: str,
+    dimension_type: str = "sector",
+    periods: int = 8,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Fund-scoped exposure trend over time."""
+    return _build_trend_response(db, dimension_type, periods, fund_id=fund_id)
 
 
 # ===========================================================================
@@ -242,6 +421,95 @@ def list_funds(
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/funds/{fund_id}/export — CSV
+# ---------------------------------------------------------------------------
+
+_FUND_EXPORT_COLUMNS = [
+    "Company Name", "Fund", "Sector", "Industry", "Country",
+    "Reported Value (USD)", "% NAV", "As of Date", "Source",
+    "Extraction Confidence", "Match Method", "Match Confidence",
+]
+
+
+@funds_router.get("/{fund_id}/export")
+def export_fund_holdings_csv(
+    fund_id: str,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """Export all holdings for a single fund as a CSV download."""
+    fund = db.query(DimFund).filter(DimFund.fund_id == fund_id).first()
+    if fund is None:
+        raise HTTPException(status_code=404, detail="Fund not found")
+
+    company_name_col = func.coalesce(DimCompany.company_name, FactReportedHolding.raw_company_name)
+    sector_col = func.coalesce(DimCompany.primary_sector, FactReportedHolding.reported_sector)
+    country_col = func.coalesce(DimCompany.primary_country, FactReportedHolding.reported_country)
+
+    rows = (
+        db.query(
+            company_name_col.label("company_name"),
+            DimFund.fund_name,
+            sector_col.label("sector"),
+            DimCompany.primary_industry.label("industry"),
+            country_col.label("country"),
+            FactReportedHolding.reported_value_usd,
+            FactReportedHolding.extraction_confidence,
+            FactReportedHolding.as_of_date,
+            FactReportedHolding.source,
+            EntityResolutionLog.match_method,
+            EntityResolutionLog.match_confidence,
+        )
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .join(DimFund, FactFundReport.fund_id == DimFund.fund_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .outerjoin(
+            EntityResolutionLog,
+            FactReportedHolding.reported_holding_id == EntityResolutionLog.reported_holding_id,
+        )
+        .filter(DimFund.fund_id == fund_id)
+        .all()
+    )
+
+    fund_total = sum(
+        float(r.reported_value_usd) for r in rows if r.reported_value_usd is not None
+    )
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=_FUND_EXPORT_COLUMNS)
+    writer.writeheader()
+    for row in rows:
+        value = float(row.reported_value_usd) if row.reported_value_usd is not None else None
+        pct_nav = round(value / fund_total * 100, 4) if (value is not None and fund_total > 0) else None
+        writer.writerow({
+            "Company Name": row.company_name or "",
+            "Fund": row.fund_name or "",
+            "Sector": row.sector or "",
+            "Industry": row.industry or "",
+            "Country": row.country or "",
+            "Reported Value (USD)": value if value is not None else "",
+            "% NAV": pct_nav if pct_nav is not None else "",
+            "As of Date": row.as_of_date or "",
+            "Source": row.source or "",
+            "Extraction Confidence": (
+                float(row.extraction_confidence) if row.extraction_confidence is not None else ""
+            ),
+            "Match Method": row.match_method or "",
+            "Match Confidence": (
+                float(row.match_confidence) if row.match_confidence is not None else ""
+            ),
+        })
+
+    safe_name = fund.fund_name.replace(" ", "_").replace("/", "-")[:30]
+    filename = f"lookthrough_{safe_name}_{date.today().isoformat()}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

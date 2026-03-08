@@ -2,12 +2,15 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
+  AreaChart,
+  Area,
   BarChart,
   Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
+  Legend,
   ResponsiveContainer,
 } from 'recharts'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
@@ -24,7 +27,10 @@ import {
   ChevronsLeft,
   ChevronsRight,
   AlertCircle,
+  Download,
+  Loader2,
 } from 'lucide-react'
+import { downloadExport } from '../utils/exportUtils'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -167,6 +173,74 @@ function SectorChart({ sectors }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Exposure Trend Chart (fund-scoped)
+// ---------------------------------------------------------------------------
+
+const TREND_COLORS = [
+  '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
+]
+
+function ExposureTrendChart({ data, loading }) {
+  if (loading) {
+    return (
+      <div className="h-64 flex items-center justify-center">
+        <div className="space-y-3 w-full px-4">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="h-8 bg-secondary-200 rounded animate-pulse" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (!data?.dates?.length || !data?.series?.length) {
+    return (
+      <div className="h-64 flex items-center justify-center text-secondary-400 text-sm">
+        No trend data available. Run the pipeline to generate snapshots.
+      </div>
+    )
+  }
+
+  const chartData = data.dates.map((d, i) => {
+    const point = { date: d }
+    data.series.forEach((s) => { point[s.name] = s.data[i] ?? 0 })
+    return point
+  })
+
+  return (
+    <ResponsiveContainer width="100%" height={280}>
+      <AreaChart data={chartData} margin={{ left: 8, right: 16, top: 4, bottom: 4 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+        <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+        <YAxis
+          tickFormatter={(v) => `${v.toFixed(0)}%`}
+          tick={{ fontSize: 10, fill: '#64748b' }}
+          axisLine={false}
+          tickLine={false}
+          domain={[0, 100]}
+        />
+        <Tooltip
+          formatter={(value, name) => [`${Number(value).toFixed(1)}%`, name]}
+          contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
+        />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        {data.series.map((s, i) => (
+          <Area
+            key={s.name}
+            type="monotone"
+            dataKey={s.name}
+            stackId="1"
+            stroke={TREND_COLORS[i % TREND_COLORS.length]}
+            fill={TREND_COLORS[i % TREND_COLORS.length]}
+            fillOpacity={0.7}
+          />
+        ))}
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+}
+
 function Pagination({ page, totalPages, onPageChange }) {
   if (totalPages <= 1) return null
   return (
@@ -216,6 +290,21 @@ export default function FundDetailPage() {
   const { fund_id } = useParams()
   const [searchInput, setSearchInput] = useState('')
   const [filters, setFilters] = useState({ search: '', hasValue: false, page: 1 })
+  const [isExporting, setIsExporting] = useState(false)
+  const [trendDim, setTrendDim] = useState('sector')
+
+  async function handleExport() {
+    setIsExporting(true)
+    try {
+      const today = new Date().toISOString().split('T')[0]
+      await downloadExport(
+        `/api/funds/${fund_id}/export`,
+        `lookthrough_fund_${fund_id}_${today}.csv`,
+      )
+    } finally {
+      setIsExporting(false)
+    }
+  }
 
   // Debounce search 300ms
   useEffect(() => {
@@ -242,6 +331,15 @@ export default function FundDetailPage() {
     queryFn: () => fetchJSON(`/api/funds/${fund_id}`),
     staleTime: 5 * 60 * 1000,
     retry: 1,
+  })
+
+  const { data: trendData, isLoading: trendLoading } = useQuery({
+    queryKey: ['fund-exposure-trend', fund_id, trendDim],
+    queryFn: () =>
+      fetchJSON(
+        `/api/dashboard/exposure-trend/fund/${fund_id}?dimension_type=${trendDim}&periods=8`,
+      ),
+    enabled: !!fund_id,
   })
 
   // Holdings for this fund
@@ -305,6 +403,7 @@ export default function FundDetailPage() {
       </Link>
 
       {/* Header */}
+      <div className="flex items-start justify-between gap-4">
       <div className="flex flex-col gap-2">
         <h1 className="text-2xl font-bold text-secondary-900">{fund.fund_name}</h1>
         <div className="flex flex-wrap items-center gap-2">
@@ -332,6 +431,20 @@ export default function FundDetailPage() {
             <span className="text-xs text-secondary-300 font-mono">{fund.source}</span>
           )}
         </div>
+      </div>
+
+        <button
+          onClick={handleExport}
+          disabled={isExporting}
+          className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-secondary-700 border border-secondary-200 rounded-md bg-white hover:bg-secondary-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+        >
+          {isExporting ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          Export CSV
+        </button>
       </div>
 
       {/* Stat cards */}
@@ -439,6 +552,33 @@ export default function FundDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Exposure Trend */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle>Exposure Trend</CardTitle>
+            <div className="flex items-center gap-1">
+              {['sector', 'geography'].map((dim) => (
+                <button
+                  key={dim}
+                  onClick={() => setTrendDim(dim)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    trendDim === dim
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-secondary-100 text-secondary-600 hover:bg-secondary-200'
+                  }`}
+                >
+                  {dim.charAt(0).toUpperCase() + dim.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <ExposureTrendChart data={trendData} loading={trendLoading} />
+        </CardContent>
+      </Card>
 
       {/* Full holdings section */}
       <div>

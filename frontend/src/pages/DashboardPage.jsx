@@ -1,12 +1,16 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
+  AreaChart,
+  Area,
   BarChart,
   Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
+  Legend,
   ResponsiveContainer,
 } from 'recharts'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card'
@@ -105,6 +109,7 @@ function ErrorBanner({ message }) {
 const CHART_COLOR = '#1A4B9B' // primary-500
 
 function SectorChart({ sectors }) {
+  const navigate = useNavigate()
   const data = sectors.map((s) => ({
     name: s.sector.length > 20 ? s.sector.slice(0, 18) + '…' : s.sector,
     fullName: s.sector,
@@ -113,9 +118,21 @@ function SectorChart({ sectors }) {
     pct: s.percentage,
   }))
 
+  function handleBarClick(payload) {
+    if (payload?.activePayload?.[0]?.payload?.fullName) {
+      navigate(`/gics?sector=${encodeURIComponent(payload.activePayload[0].payload.fullName)}`)
+    }
+  }
+
   return (
     <ResponsiveContainer width="100%" height={280}>
-      <BarChart data={data} layout="vertical" margin={{ left: 8, right: 32, top: 4, bottom: 4 }}>
+      <BarChart
+        data={data}
+        layout="vertical"
+        margin={{ left: 8, right: 32, top: 4, bottom: 4 }}
+        onClick={handleBarClick}
+        style={{ cursor: 'pointer' }}
+      >
         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
         <XAxis
           type="number"
@@ -137,7 +154,7 @@ function SectorChart({ sectors }) {
           formatter={(value, _name, props) => {
             const { total_value, pct, fullName } = props.payload
             const valueStr = total_value != null ? ` · ${formatAUM(total_value)}` : ''
-            return [`${formatNumber(value)} holdings${valueStr} (${pct}%)`, fullName]
+            return [`${formatNumber(value)} holdings${valueStr} (${pct}%) — click to drill in`, fullName]
           }}
           contentStyle={{
             fontSize: 12,
@@ -147,6 +164,74 @@ function SectorChart({ sectors }) {
         />
         <Bar dataKey="value" fill={CHART_COLOR} radius={[0, 4, 4, 0]} maxBarSize={24} />
       </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Exposure Trend Chart
+// ---------------------------------------------------------------------------
+
+const TREND_COLORS = [
+  '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
+]
+
+function ExposureTrendChart({ data, loading }) {
+  if (loading) {
+    return (
+      <div className="h-64 flex items-center justify-center">
+        <div className="space-y-3 w-full px-4">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="h-8 bg-secondary-200 rounded animate-pulse" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (!data?.dates?.length || !data?.series?.length) {
+    return (
+      <div className="h-64 flex items-center justify-center text-secondary-400 text-sm">
+        No trend data available. Run the pipeline to generate snapshots.
+      </div>
+    )
+  }
+
+  const chartData = data.dates.map((d, i) => {
+    const point = { date: d }
+    data.series.forEach((s) => { point[s.name] = s.data[i] ?? 0 })
+    return point
+  })
+
+  return (
+    <ResponsiveContainer width="100%" height={280}>
+      <AreaChart data={chartData} margin={{ left: 8, right: 16, top: 4, bottom: 4 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+        <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+        <YAxis
+          tickFormatter={(v) => `${v.toFixed(0)}%`}
+          tick={{ fontSize: 10, fill: '#64748b' }}
+          axisLine={false}
+          tickLine={false}
+          domain={[0, 100]}
+        />
+        <Tooltip
+          formatter={(value, name) => [`${Number(value).toFixed(1)}%`, name]}
+          contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
+        />
+        <Legend wrapperStyle={{ fontSize: 11 }} />
+        {data.series.map((s, i) => (
+          <Area
+            key={s.name}
+            type="monotone"
+            dataKey={s.name}
+            stackId="1"
+            stroke={TREND_COLORS[i % TREND_COLORS.length]}
+            fill={TREND_COLORS[i % TREND_COLORS.length]}
+            fillOpacity={0.7}
+          />
+        ))}
+      </AreaChart>
     </ResponsiveContainer>
   )
 }
@@ -203,6 +288,8 @@ function FundTable({ funds }) {
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
+  const [trendDim, setTrendDim] = useState('sector')
+
   const {
     data: stats,
     isLoading: statsLoading,
@@ -228,6 +315,14 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ['dashboard-funds'],
     queryFn: () => fetchJSON('/api/dashboard/fund-breakdown'),
+  })
+
+  const { data: trendData, isLoading: trendLoading } = useQuery({
+    queryKey: ['exposure-trend', trendDim],
+    queryFn: () =>
+      fetchJSON(
+        `/api/dashboard/exposure-trend?dimension_type=${trendDim}&periods=8`,
+      ),
   })
 
   return (
@@ -344,6 +439,33 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Portfolio Exposure Over Time */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle>Portfolio Exposure Over Time</CardTitle>
+            <div className="flex items-center gap-1">
+              {['sector', 'geography'].map((dim) => (
+                <button
+                  key={dim}
+                  onClick={() => setTrendDim(dim)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    trendDim === dim
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-secondary-100 text-secondary-600 hover:bg-secondary-200'
+                  }`}
+                >
+                  {dim.charAt(0).toUpperCase() + dim.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <ExposureTrendChart data={trendData} loading={trendLoading} />
+        </CardContent>
+      </Card>
     </div>
   )
 }

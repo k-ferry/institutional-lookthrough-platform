@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import uuid
+from datetime import date as _date_cls
 from pathlib import Path
 
 import numpy as np
@@ -35,10 +37,10 @@ import pandas as pd
 
 from src.lookthrough.db.repository import (
     _is_csv_mode,
-    bulk_insert,
     dataframe_to_records,
-    delete_all,
+    execute_update,
     get_all,
+    upsert_rows,
 )
 from src.lookthrough.db.models import (
     DimCompany,
@@ -232,6 +234,73 @@ def _build_reported_sector_to_taxonomy_lookup(taxonomy_df: pd.DataFrame) -> dict
     return lookup
 
 
+def _run_aggregation(
+    exposures_df: pd.DataFrame,
+    group_cols: list[str],
+    taxonomy_type_configs: list[tuple],
+) -> pd.DataFrame:
+    """
+    Aggregate resolved exposures by group columns and taxonomy types.
+
+    Args:
+        exposures_df: DataFrame with taxonomy resolution columns appended.
+        group_cols: Columns to group by (e.g. ["run_id", "portfolio_id", "as_of_date"]).
+        taxonomy_type_configs: List of (taxonomy_type, node_col, conf_col) tuples.
+
+    Returns:
+        DataFrame of aggregation rows (coverage_pct is np.nan, filled by caller).
+    """
+    aggregation_rows = []
+    for taxonomy_type, node_col, conf_col in taxonomy_type_configs:
+        grouped = exposures_df.groupby(group_cols + [node_col])
+        for keys, group in grouped:
+            *group_vals, taxonomy_node_id = keys
+            group_dict = dict(zip(group_cols, group_vals))
+            total_exposure_value_usd = group["exposure_value_usd"].sum()
+            confidence_weighted_exposure = (
+                group["exposure_value_usd"] * group[conf_col]
+            ).sum()
+            aggregation_rows.append(
+                {
+                    **group_dict,
+                    "taxonomy_type": taxonomy_type,
+                    "taxonomy_node_id": taxonomy_node_id,
+                    "total_exposure_value_usd": total_exposure_value_usd,
+                    "total_exposure_p10": np.nan,
+                    "total_exposure_p90": np.nan,
+                    "coverage_pct": np.nan,
+                    "confidence_weighted_exposure": confidence_weighted_exposure,
+                }
+            )
+    return pd.DataFrame(aggregation_rows) if aggregation_rows else pd.DataFrame()
+
+
+def _compute_coverage_pct(result: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
+    """
+    Compute coverage_pct for an aggregation result DataFrame.
+
+    coverage_pct = sum(exposure for known nodes) / sum(all exposure) per group.
+
+    Args:
+        result: Aggregation DataFrame (must have taxonomy_node_id, total_exposure_value_usd).
+        group_keys: Columns defining the coverage group.
+
+    Returns:
+        DataFrame with coverage_pct column populated.
+    """
+    if len(result) == 0:
+        return result
+    result = result.copy()
+    portfolio_totals = result.groupby(group_keys)["total_exposure_value_usd"].transform(
+        "sum"
+    )
+    is_known = result["taxonomy_node_id"] != UNKNOWN_TAXONOMY_NODE_ID
+    result["_known_exposure"] = result["total_exposure_value_usd"].where(is_known, 0.0)
+    known_totals = result.groupby(group_keys)["_known_exposure"].transform("sum")
+    result["coverage_pct"] = (known_totals / portfolio_totals).fillna(0.0)
+    return result.drop(columns=["_known_exposure"])
+
+
 def aggregate_exposures_v1(csv_mode: bool = False) -> pd.DataFrame:
     """
     V1 aggregation: group inferred exposures by taxonomy buckets.
@@ -358,86 +427,97 @@ def aggregate_exposures_v1(csv_mode: bool = False) -> pd.DataFrame:
     resolved = exposures.apply(resolve_taxonomy, axis=1, result_type="expand")
     exposures = pd.concat([exposures, resolved], axis=1)
 
-    # Prepare aggregation output
-    aggregation_rows = []
-
-    # Group keys
-    group_cols = ["run_id", "portfolio_id", "as_of_date"]
-
-    # Aggregate for each taxonomy type
+    # Taxonomy type config shared by both portfolio- and fund-level aggregations
     taxonomy_type_configs = [
         ("sector", "sector_node_id", "sector_confidence"),
         ("industry", "industry_node_id", "industry_confidence"),
         ("geography", "geography_node_id", "geography_confidence"),
     ]
 
-    for taxonomy_type, node_col, conf_col in taxonomy_type_configs:
-        # Group by run_id, portfolio_id, as_of_date, taxonomy_node_id
-        grouped = exposures.groupby(group_cols + [node_col])
-
-        for keys, group in grouped:
-            run_id, portfolio_id, as_of_date, taxonomy_node_id = keys
-
-            total_exposure_value_usd = group["exposure_value_usd"].sum()
-
-            # confidence_weighted_exposure = sum(exposure_value_usd * confidence)
-            confidence_weighted_exposure = (
-                group["exposure_value_usd"] * group[conf_col]
-            ).sum()
-
-            aggregation_rows.append(
-                {
-                    "run_id": run_id,
-                    "portfolio_id": portfolio_id,
-                    "as_of_date": as_of_date,
-                    "taxonomy_type": taxonomy_type,
-                    "taxonomy_node_id": taxonomy_node_id,
-                    "total_exposure_value_usd": total_exposure_value_usd,
-                    "total_exposure_p10": np.nan,  # Not computed in V1
-                    "total_exposure_p90": np.nan,  # Not computed in V1
-                    "coverage_pct": np.nan,  # Computed below at portfolio level
-                    "confidence_weighted_exposure": confidence_weighted_exposure,
-                }
-            )
-
-    # Compute coverage_pct at portfolio level per (run_id, portfolio_id, as_of_date, taxonomy_type)
-    # coverage_pct = sum(exposure where known) / sum(all exposure)
-    result = pd.DataFrame(aggregation_rows)
-    if len(result) > 0:
-        # Calculate total exposure per (run_id, portfolio_id, as_of_date, taxonomy_type)
-        portfolio_totals = result.groupby(
-            ["run_id", "portfolio_id", "as_of_date", "taxonomy_type"]
-        )["total_exposure_value_usd"].transform("sum")
-
-        # Known exposure = total where taxonomy_node_id != UNKNOWN
-        is_known = result["taxonomy_node_id"] != UNKNOWN_TAXONOMY_NODE_ID
-        result["_known_exposure"] = result["total_exposure_value_usd"].where(is_known, 0.0)
-
-        known_totals = result.groupby(
-            ["run_id", "portfolio_id", "as_of_date", "taxonomy_type"]
-        )["_known_exposure"].transform("sum")
-
-        result["coverage_pct"] = (known_totals / portfolio_totals).fillna(0.0)
-        result = result.drop(columns=["_known_exposure"])
+    # Portfolio-level aggregation (fund_id='')
+    port_group_cols = ["run_id", "portfolio_id", "as_of_date"]
+    port_result = _run_aggregation(exposures, port_group_cols, taxonomy_type_configs)
+    port_result = _compute_coverage_pct(
+        port_result, ["run_id", "portfolio_id", "as_of_date", "taxonomy_type"]
+    )
 
     # Sort deterministically for reproducibility
-    result = result.sort_values(
+    port_result = port_result.sort_values(
         ["run_id", "portfolio_id", "as_of_date", "taxonomy_type", "taxonomy_node_id"]
     ).reset_index(drop=True)
 
     # Write output
     if csv_mode:
+        # CSV mode: overwrite (no time-series without DB)
+        csv_out = port_result.copy()
+        csv_out["fund_id"] = ""
+        csv_out["snapshot_id"] = ""
+        csv_out["snapshot_date"] = ""
+        csv_out["is_latest"] = True
         out_path = gold / "fact_aggregation_snapshot.csv"
-        result.to_csv(out_path, index=False)
+        csv_out.to_csv(out_path, index=False)
         print(f"Wrote: {out_path}")
+        print(f"Rows: {len(port_result)}")
     else:
-        delete_all(FactAggregationSnapshot)
-        bulk_insert(FactAggregationSnapshot, dataframe_to_records(result))
-        print("Wrote: PostgreSQL:fact_aggregation_snapshot")
+        snapshot_id = str(uuid.uuid4())
+        snapshot_date = _date_cls.today().isoformat()
 
-    print(f"Rows: {len(result)}")
+        # 1. Mark all existing rows stale
+        execute_update(
+            "UPDATE fact_aggregation_snapshot SET is_latest = FALSE WHERE is_latest = TRUE"
+        )
 
-    return result
+        # 2. Stamp portfolio-level rows and set fund_id=''
+        port_result["fund_id"] = ""
+        port_result["snapshot_id"] = snapshot_id
+        port_result["snapshot_date"] = snapshot_date
+        port_result["is_latest"] = True
+
+        # 3. Fund-level aggregation
+        fund_group_cols = ["run_id", "portfolio_id", "fund_id", "as_of_date"]
+        fund_result = _run_aggregation(exposures, fund_group_cols, taxonomy_type_configs)
+        fund_result = _compute_coverage_pct(
+            fund_result,
+            ["run_id", "portfolio_id", "fund_id", "as_of_date", "taxonomy_type"],
+        )
+        fund_result["snapshot_id"] = snapshot_id
+        fund_result["snapshot_date"] = snapshot_date
+        fund_result["is_latest"] = True
+
+        # 4. Combine, deduplicate, and upsert
+        all_records = pd.concat([port_result, fund_result], ignore_index=True)
+        pk_cols = ["snapshot_id", "portfolio_id", "fund_id", "taxonomy_type", "taxonomy_node_id"]
+        before = len(all_records)
+        all_records = all_records.drop_duplicates(subset=pk_cols, keep="last")
+        dropped = before - len(all_records)
+        if dropped:
+            print(f"Dropped {dropped} duplicate rows before insert")
+        upsert_rows(
+            FactAggregationSnapshot,
+            dataframe_to_records(all_records),
+            pk_cols,
+        )
+
+        # 5. Cleanup: remove snapshots older than 24 months
+        today = _date_cls.today()
+        try:
+            cutoff = today.replace(year=today.year - 2).isoformat()
+        except ValueError:  # Feb 29 leap-year edge case
+            cutoff = today.replace(year=today.year - 2, day=28).isoformat()
+        n_deleted = execute_update(
+            "DELETE FROM fact_aggregation_snapshot WHERE snapshot_date < :cutoff",
+            {"cutoff": cutoff},
+        )
+        if n_deleted:
+            print(f"Cleaned up {n_deleted} rows older than 24 months")
+
+        print(
+            f"Appended snapshot {snapshot_id} for {snapshot_date}. "
+            f"Total rows: {len(all_records)}"
+        )
+        print(f"Rows (portfolio-level): {len(port_result)}")
+
+    return port_result
 
 
 def main() -> None:
