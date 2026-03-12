@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Optional
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
-from anthropic import Anthropic, transform_schema
+from anthropic import Anthropic, RateLimitError, transform_schema
 
 from src.lookthrough.db.repository import (
     _is_csv_mode,
@@ -40,7 +41,9 @@ class CompanyClassificationOut(BaseModel):
 
 @dataclass(frozen=True)
 class ClassifierConfig:
-    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+    # Default to Haiku — 20x cheaper than Sonnet, fully capable for structured classification.
+    # Override with ANTHROPIC_MODEL env var if Sonnet or another model is needed.
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     max_tokens: int = 512
     prompt_version: str = "v1"
     confidence_threshold: float = 0.70  # below this should go to review queue later
@@ -63,6 +66,41 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
+
+
+def _estimate_tokens(n_nodes: int, company_name: str, company_description: Optional[str]) -> int:
+    """Rough token estimate for a classify_one() API call."""
+    base = 100  # prompt text + taxonomy_type line + JSON framing
+    name_tokens = max(1, len(company_name) // 4)
+    desc_tokens = max(0, len(company_description or "") // 4)
+    node_tokens = n_nodes * 7  # ~7 tokens per node name on average
+    return base + name_tokens + desc_tokens + node_tokens
+
+
+def _build_sector_to_industry_map(taxonomy: pd.DataFrame) -> dict[str, list[str]]:
+    """Build mapping: sector node_name -> list of child industry node_names.
+
+    Links industry nodes to sectors via parent_node_id. BDC-sourced industry
+    nodes (which have null parent_node_id) are excluded automatically.
+    """
+    sector_nodes = taxonomy[taxonomy["taxonomy_type"] == "sector"].copy()
+    industry_nodes = taxonomy[taxonomy["taxonomy_type"] == "industry"].copy()
+
+    sector_id_to_name: dict[str, str] = {
+        str(row["taxonomy_node_id"]): str(row["node_name"])
+        for _, row in sector_nodes.iterrows()
+    }
+
+    result: dict[str, list[str]] = {name: [] for name in sector_id_to_name.values()}
+    for _, row in industry_nodes.iterrows():
+        parent_id = row.get("parent_node_id")
+        if pd.isna(parent_id):
+            continue  # BDC-sourced nodes have no sector parent — skip
+        sector_name = sector_id_to_name.get(str(parent_id))
+        if sector_name:
+            result[sector_name].append(str(row["node_name"]))
+
+    return {k: sorted(v) for k, v in result.items()}
 
 
 def classify_one(
@@ -129,6 +167,78 @@ def classify_one(
     return parsed
 
 
+def _classify_one_with_retry(
+    client: Anthropic,
+    cfg: ClassifierConfig,
+    prompt_text: str,
+    taxonomy_type: str,
+    allowed_nodes: list[str],
+    company_name: str,
+    company_country: Optional[str],
+    company_description: Optional[str],
+) -> CompanyClassificationOut:
+    """Wrapper around classify_one that retries once on RateLimitError."""
+    try:
+        return classify_one(
+            client=client,
+            cfg=cfg,
+            prompt_text=prompt_text,
+            taxonomy_type=taxonomy_type,
+            allowed_nodes=allowed_nodes,
+            company_name=company_name,
+            company_country=company_country,
+            company_description=company_description,
+        )
+    except RateLimitError:
+        print("Rate limited — waiting 60s and retrying")
+        time.sleep(60)
+        return classify_one(
+            client=client,
+            cfg=cfg,
+            prompt_text=prompt_text,
+            taxonomy_type=taxonomy_type,
+            allowed_nodes=allowed_nodes,
+            company_name=company_name,
+            company_country=company_country,
+            company_description=company_description,
+        )
+
+
+def _make_row(
+    run_id: str,
+    company_id: Optional[str],
+    company_name: str,
+    result: CompanyClassificationOut,
+    taxonomy_node_id: str,
+    model: str,
+    prompt_version: str,
+) -> dict:
+    return {
+        "classification_id": str(uuid.uuid4()),
+        "run_id": run_id,
+        "company_id": company_id,
+        "raw_company_name": company_name,
+        "taxonomy_type": result.taxonomy_type,
+        "taxonomy_node_id": taxonomy_node_id,
+        "confidence": result.confidence,
+        "rationale": result.rationale,
+        "assumptions_json": json.dumps(result.assumptions, ensure_ascii=False),
+        "model": model,
+        "prompt_version": prompt_version,
+    }
+
+
+def _lookup_node_id(taxonomy: pd.DataFrame, taxonomy_type: str, node_name: str) -> str:
+    """Return the taxonomy_node_id for a given type+name, or the zero UUID if not found."""
+    match = taxonomy[
+        (taxonomy["taxonomy_type"] == taxonomy_type)
+        & (taxonomy["node_name"].astype(str) == node_name)
+    ]
+    if len(match):
+        return str(match.iloc[0]["taxonomy_node_id"])
+    return "00000000-0000-0000-0000-000000000000"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20, help="Max companies to classify (V1 safety).")
@@ -184,7 +294,7 @@ def main() -> None:
         companies = companies[unclassified_mask].copy()
         print(f"Found {len(companies)} unclassified companies (taxonomy_type={args.taxonomy_type})")
 
-    # Build allowed node list for this taxonomy type
+    # Build allowed node list for the requested taxonomy type (used in single-step path)
     tax = taxonomy[taxonomy["taxonomy_type"] == args.taxonomy_type].copy()
     allowed_nodes = sorted(tax["node_name"].astype(str).unique().tolist())
 
@@ -195,6 +305,8 @@ def main() -> None:
     # Load existing classifications to skip already-classified companies
     # -----------------------------------------------------------------------
     already_classified: set[tuple[str, str]] = set()
+    # Maps company_id -> sector node_name from a prior run (used in two-step industry mode)
+    existing_sector_for_company: dict[str, str] = {}
 
     if csv_mode:
         out_path = gold / "fact_exposure_classification.csv"
@@ -204,12 +316,35 @@ def main() -> None:
             for _, row in existing_df.iterrows():
                 already_classified.add((str(row["company_id"]), str(row["taxonomy_type"])))
             print(f"Loaded {len(existing_df)} existing classifications from {out_path}")
+
+            if args.taxonomy_type == "industry":
+                sector_id_to_name = {
+                    str(r["taxonomy_node_id"]): str(r["node_name"])
+                    for _, r in taxonomy[taxonomy["taxonomy_type"] == "sector"].iterrows()
+                }
+                for _, row in existing_df[existing_df["taxonomy_type"] == "sector"].iterrows():
+                    name = sector_id_to_name.get(str(row["taxonomy_node_id"]))
+                    if name:
+                        existing_sector_for_company[str(row["company_id"])] = name
     else:
         existing_classifications = get_all(FactExposureClassification)
         if not existing_classifications.empty:
             for _, row in existing_classifications.iterrows():
                 already_classified.add((str(row["company_id"]), str(row["taxonomy_type"])))
             print(f"Loaded {len(existing_classifications)} existing classifications from PostgreSQL")
+
+            if args.taxonomy_type == "industry":
+                sector_id_to_name = {
+                    str(r["taxonomy_node_id"]): str(r["node_name"])
+                    for _, r in taxonomy[taxonomy["taxonomy_type"] == "sector"].iterrows()
+                }
+                sector_class = existing_classifications[
+                    existing_classifications["taxonomy_type"] == "sector"
+                ]
+                for _, row in sector_class.iterrows():
+                    name = sector_id_to_name.get(str(row["taxonomy_node_id"]))
+                    if name:
+                        existing_sector_for_company[str(row["company_id"])] = name
         existing_df = None  # not used in DB mode
 
     # Optional fields present in some tables
@@ -219,24 +354,34 @@ def main() -> None:
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     run_id = str(uuid.uuid4())
-    out_rows = []
+    out_rows: list[dict] = []
     skipped = 0
+    total = len(companies)
+    total_written = 0
+
+    # Pre-build data structures for two-step industry classification
+    sector_to_industry_map: dict[str, list[str]] = {}
+    sector_allowed_nodes: list[str] = []
+    if args.taxonomy_type == "industry":
+        sector_to_industry_map = _build_sector_to_industry_map(taxonomy)
+        sector_allowed_nodes = sorted(
+            taxonomy[taxonomy["taxonomy_type"] == "sector"]["node_name"].astype(str).unique().tolist()
+        )
+        industry_counts = {k: len(v) for k, v in sector_to_industry_map.items() if v}
+        print(
+            f"Two-step industry mode: {len(sector_allowed_nodes)} sector nodes, "
+            f"{sum(industry_counts.values())} GICS industry nodes across {len(industry_counts)} sectors"
+        )
 
     # -----------------------------------------------------------------------
     # Classification loop
     # -----------------------------------------------------------------------
-    for _, c in companies.iterrows():
+    for i, (_, c) in enumerate(companies.iterrows(), start=1):
         company_id = str(c["company_id"]) if "company_id" in companies.columns else None
         company_name = (
             str(c["company_name"]) if "company_name" in companies.columns
             else str(c.get("raw_company_name", ""))
         )
-
-        # Skip if already classified for this taxonomy_type
-        if (company_id, args.taxonomy_type) in already_classified:
-            skipped += 1
-            continue
-
         company_country = (
             str(c[country_col]) if country_col and pd.notna(c[country_col]) else None
         )
@@ -244,45 +389,143 @@ def main() -> None:
             str(c[desc_col]) if desc_col and pd.notna(c[desc_col]) else None
         )
 
-        result = classify_one(
-            client=client,
-            cfg=cfg,
-            prompt_text=prompt_text,
-            taxonomy_type=args.taxonomy_type,
-            allowed_nodes=allowed_nodes,
-            company_name=company_name,
-            company_country=company_country,
-            company_description=company_desc,
-        )
+        if args.taxonomy_type == "industry":
+            # -----------------------------------------------------------------
+            # Two-step: sector → filtered industry
+            # -----------------------------------------------------------------
+            sector_done = (company_id, "sector") in already_classified
+            industry_done = (company_id, "industry") in already_classified
 
-        # Map node_name -> taxonomy_node_id
-        if result.node_name is None:
-            taxonomy_node_id = "00000000-0000-0000-0000-000000000000"
+            if sector_done and industry_done:
+                skipped += 1
+                continue
+
+            # Step 1 — Sector (skip if already classified)
+            sector_name: Optional[str] = None
+            if sector_done:
+                sector_name = existing_sector_for_company.get(company_id)
+                print(f"[{i}/{total}] {company_name} — sector already classified: {sector_name}")
+            else:
+                n = len(sector_allowed_nodes)
+                est = _estimate_tokens(n, company_name, company_desc)
+                print(
+                    f"Classifying [{i}/{total}]: {company_name} — "
+                    f"Step 1 (sector): {n} nodes, est. {est} tokens"
+                )
+                sector_result = _classify_one_with_retry(
+                    client=client,
+                    cfg=cfg,
+                    prompt_text=prompt_text,
+                    taxonomy_type="sector",
+                    allowed_nodes=sector_allowed_nodes,
+                    company_name=company_name,
+                    company_country=company_country,
+                    company_description=company_desc,
+                )
+                sec_node_id = (
+                    _lookup_node_id(taxonomy, "sector", sector_result.node_name)
+                    if sector_result.node_name
+                    else "00000000-0000-0000-0000-000000000000"
+                )
+                out_rows.append(
+                    _make_row(run_id, company_id, company_name, sector_result, sec_node_id, cfg.model, cfg.prompt_version)
+                )
+
+                if sector_result.node_name is None or sector_result.confidence < cfg.confidence_threshold:
+                    print(
+                        f"  → Sector unclassifiable (confidence={sector_result.confidence:.2f}), "
+                        f"skipping industry"
+                    )
+                    sector_name = None
+                else:
+                    sector_name = sector_result.node_name
+                    print(f"  → Sector: {sector_name} ({sector_result.confidence:.2f})")
+
+            # Step 2 — Industry (using only nodes from the matched sector)
+            if sector_name is not None and not industry_done:
+                filtered_nodes = sector_to_industry_map.get(sector_name, [])
+                if not filtered_nodes:
+                    print(f"  → No GICS industry nodes mapped for sector '{sector_name}', skipping industry")
+                else:
+                    n = len(filtered_nodes)
+                    est = _estimate_tokens(n, company_name, company_desc)
+                    print(
+                        f"Classifying [{i}/{total}]: {company_name} — "
+                        f"Step 2 (industry, sector={sector_name}): {n} nodes, est. {est} tokens"
+                    )
+                    industry_result = _classify_one_with_retry(
+                        client=client,
+                        cfg=cfg,
+                        prompt_text=prompt_text,
+                        taxonomy_type="industry",
+                        allowed_nodes=filtered_nodes,
+                        company_name=company_name,
+                        company_country=company_country,
+                        company_description=company_desc,
+                    )
+                    ind_node_id = (
+                        _lookup_node_id(taxonomy, "industry", industry_result.node_name)
+                        if industry_result.node_name
+                        else "00000000-0000-0000-0000-000000000000"
+                    )
+                    if industry_result.node_name is None:
+                        print(f"  → Industry unclassifiable")
+                    elif industry_result.confidence < cfg.confidence_threshold:
+                        print(f"  → Industry low confidence ({industry_result.confidence:.2f}): {industry_result.node_name}")
+                    else:
+                        print(f"  → Industry: {industry_result.node_name} ({industry_result.confidence:.2f})")
+                    out_rows.append(
+                        _make_row(run_id, company_id, company_name, industry_result, ind_node_id, cfg.model, cfg.prompt_version)
+                    )
+
         else:
-            match = tax[tax["node_name"].astype(str) == result.node_name]
-            taxonomy_node_id = (
-                str(match.iloc[0]["taxonomy_node_id"])
-                if len(match)
-                else "00000000-0000-0000-0000-000000000000"
+            # -----------------------------------------------------------------
+            # Single-step: sector or geography
+            # -----------------------------------------------------------------
+            if (company_id, args.taxonomy_type) in already_classified:
+                skipped += 1
+                continue
+
+            n = len(allowed_nodes)
+            est = _estimate_tokens(n, company_name, company_desc)
+            print(
+                f"Classifying [{i}/{total}]: {company_name} — "
+                f"{n} nodes, est. {est} tokens"
+            )
+            result = _classify_one_with_retry(
+                client=client,
+                cfg=cfg,
+                prompt_text=prompt_text,
+                taxonomy_type=args.taxonomy_type,
+                allowed_nodes=allowed_nodes,
+                company_name=company_name,
+                company_country=company_country,
+                company_description=company_desc,
             )
 
-        out_rows.append(
-            {
-                "classification_id": str(uuid.uuid4()),
-                "run_id": run_id,
-                "company_id": company_id,
-                "raw_company_name": company_name,
-                "taxonomy_type": result.taxonomy_type,
-                "taxonomy_node_id": taxonomy_node_id,
-                "confidence": result.confidence,
-                "rationale": result.rationale,
-                "assumptions_json": json.dumps(result.assumptions, ensure_ascii=False),
-                "model": cfg.model,
-                "prompt_version": cfg.prompt_version,
-            }
-        )
+            if result.node_name is None:
+                print(f"  → Unclassifiable")
+            elif result.confidence < cfg.confidence_threshold:
+                print(f"  → Low confidence ({result.confidence:.2f}): {result.node_name}")
+            else:
+                print(f"  → {result.node_name} ({result.confidence:.2f})")
 
-    new_df = pd.DataFrame(out_rows)
+            node_id = (
+                _lookup_node_id(taxonomy, args.taxonomy_type, result.node_name)
+                if result.node_name
+                else "00000000-0000-0000-0000-000000000000"
+            )
+            out_rows.append(
+                _make_row(run_id, company_id, company_name, result, node_id, cfg.model, cfg.prompt_version)
+            )
+
+        # Flush batch of 10 to DB in non-CSV mode
+        if not csv_mode and len(out_rows) % 10 == 0 and out_rows:
+            upsert_rows(FactExposureClassification, out_rows[-10:], ["classification_id"])
+            total_written += 10
+            print(f"Wrote 10 classifications to PostgreSQL (total so far: {total_written})")
+
+    new_df = pd.DataFrame(out_rows) if out_rows else pd.DataFrame()
 
     # -----------------------------------------------------------------------
     # Write output
@@ -296,22 +539,25 @@ def main() -> None:
         out_df.to_csv(out_path, index=False)
         print(f"Wrote: {out_path}")
     else:
-        # Write classification results to PostgreSQL
-        if out_rows:
-            upsert_rows(FactExposureClassification, out_rows, ["classification_id"])
-            print(f"Wrote {len(out_rows)} classifications to PostgreSQL:fact_exposure_classification")
-        else:
+        # Write any remaining rows not yet flushed by the in-loop batch writer
+        remainder = len(out_rows) % 10
+        if out_rows and remainder > 0:
+            upsert_rows(FactExposureClassification, out_rows[-remainder:], ["classification_id"])
+            total_written += remainder
+            print(f"Wrote {remainder} classifications to PostgreSQL (total so far: {total_written})")
+        if not out_rows:
             print("No new classifications to write.")
 
         # Update dim_company with sector/industry/node_id from classification results.
-        # Only applies to industry-type classifications (those are the ones that fill
-        # industry_taxonomy_node_id + primary_sector + primary_industry on the company row).
+        # Only applies to industry-type classifications.
         if out_rows and args.taxonomy_type == "industry":
-            _update_dim_company_from_classifications(
-                out_rows=out_rows,
-                tax=tax,
-                taxonomy=taxonomy,
-            )
+            industry_out_rows = [r for r in out_rows if r["taxonomy_type"] == "industry"]
+            if industry_out_rows:
+                _update_dim_company_from_classifications(
+                    out_rows=industry_out_rows,
+                    tax=tax,
+                    taxonomy=taxonomy,
+                )
 
     print(f"Skipped (already classified): {skipped}")
     print(f"New rows: {len(new_df)}")

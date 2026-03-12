@@ -10,6 +10,8 @@ Usage:
     python run_pipeline.py --csv        # full pipeline using CSV files
     python run_pipeline.py --classify   # with AI classification (requires ANTHROPIC_API_KEY)
     python run_pipeline.py --classify --limit 50  # classify up to 50 companies
+    python run_pipeline.py --13f        # with 13F SEC EDGAR ingestion
+    python run_pipeline.py --13f --classify  # both optional steps
 """
 import argparse
 import os
@@ -30,6 +32,12 @@ STEPS = [
         'name': 'Load Data Sources',
         'cmd': [sys.executable, '-m', 'src.lookthrough.ingestion.load_sources'],
         'always': True,
+    },
+    {
+        'name': '13F Ingestion',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.ingestion.parse_13f_filing'],
+        'always': False,
+        'flag': 'thirteenf',
     },
     {
         'name': 'Entity Resolution',
@@ -84,6 +92,7 @@ def main():
     parser.add_argument('--classify', action='store_true', help='Include AI classification step (requires ANTHROPIC_API_KEY)')
     parser.add_argument('--limit', type=int, default=20, help='Max companies to classify (default: 20)')
     parser.add_argument('--csv', action='store_true', help='Use CSV mode instead of PostgreSQL')
+    parser.add_argument('--13f', action='store_true', dest='thirteenf', help='Include 13F SEC EDGAR ingestion step')
     args = parser.parse_args()
 
     # Set CSV_MODE environment variable so all modules can access it
@@ -110,9 +119,12 @@ def main():
             args.csv = True
 
     for step in STEPS:
-        if not step['always'] and not args.classify:
-            print(f'\nSkipping: {step["name"]} (use --classify to enable)')
-            continue
+        if not step['always']:
+            flag_name = step.get('flag', 'classify')
+            if not getattr(args, flag_name, False):
+                flag_arg = '--13f' if flag_name == 'thirteenf' else f'--{flag_name}'
+                print(f'\nSkipping: {step["name"]} (use {flag_arg} to enable)')
+                continue
 
         cmd = list(step['cmd'])
 

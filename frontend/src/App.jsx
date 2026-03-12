@@ -8,6 +8,8 @@ import HoldingsPage from './pages/HoldingsPage'
 import AgentPage from './pages/AgentPage'
 import FundDetailPage from './pages/FundDetailPage'
 import CompanyDetailPage from './pages/CompanyDetailPage'
+import GeographyPage from './pages/GeographyPage'
+import GICSPage from './pages/GICSPage'
 import ReviewQueuePage from './pages/ops/ReviewQueuePage'
 import AuditTrailPage from './pages/ops/AuditTrailPage'
 import PipelineMonitorPage from './pages/ops/PipelineMonitorPage'
@@ -57,6 +59,8 @@ function AppRoutes() {
       >
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/holdings" element={<HoldingsPage />} />
+        <Route path="/geography" element={<GeographyPage />} />
+        <Route path="/gics" element={<GICSPage />} />
         <Route path="/funds" element={<DashboardPage />} />
         <Route path="/funds/:fund_id" element={<FundDetailPage />} />
         <Route path="/companies/:company_id" element={<CompanyDetailPage />} />

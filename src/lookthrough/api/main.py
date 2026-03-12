@@ -28,6 +28,7 @@ from src.lookthrough.agent.tools import (
 )
 from src.lookthrough.api.routes.agent import router as agent_router
 from src.lookthrough.api.routes.dashboard import companies_router, funds_router, router as dashboard_router
+from src.lookthrough.api.routes.gics import gics_router
 from src.lookthrough.api.routes.holdings import router as holdings_router
 from src.lookthrough.api.routes.review_queue import (
     audit_router,
@@ -62,6 +63,7 @@ app.include_router(agent_router)
 app.include_router(review_queue_router)
 app.include_router(audit_router)
 app.include_router(pipeline_router)
+app.include_router(gics_router)
 
 
 @app.on_event("startup")

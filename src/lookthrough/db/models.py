@@ -159,6 +159,7 @@ class FactReportedHolding(Base):
     reported_country: Mapped[str] = mapped_column(String(100), nullable=True)
     reported_value_usd: Mapped[float] = mapped_column(Float, nullable=True)
     reported_pct_nav: Mapped[float] = mapped_column(Float, nullable=True)
+    cusip: Mapped[str] = mapped_column(String(12), nullable=True)
     extraction_method: Mapped[str] = mapped_column(String(100), nullable=True)
     extraction_confidence: Mapped[float] = mapped_column(Float, nullable=True)
     document_id: Mapped[str] = mapped_column(String(36), nullable=True)

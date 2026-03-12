@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
@@ -9,8 +9,12 @@ import {
   ChevronsLeft,
   ChevronsRight,
   AlertCircle,
+  Download,
+  ChevronDown,
+  Loader2,
 } from 'lucide-react'
 import { Card, CardContent } from '../components/ui/card'
+import { downloadExport } from '../utils/exportUtils'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -190,6 +194,41 @@ const DEFAULT_FILTERS = {
 export default function HoldingsPage() {
   const [filters, setFilters] = useState(DEFAULT_FILTERS)
   const [searchInput, setSearchInput] = useState('')
+  const [exportOpen, setExportOpen] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const exportRef = useRef(null)
+
+  // Close export dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (exportRef.current && !exportRef.current.contains(e.target)) {
+        setExportOpen(false)
+      }
+    }
+    if (exportOpen) document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [exportOpen])
+
+  async function handleExport(format) {
+    setExportOpen(false)
+    setIsExporting(true)
+    try {
+      const params = new URLSearchParams()
+      if (filters.search) params.set('search', filters.search)
+      if (filters.fundId) params.set('fund_id', filters.fundId)
+      if (filters.sector) params.set('sector', filters.sector)
+      if (filters.hasValue) params.set('has_value', 'true')
+      const suffix = format === 'excel' ? '/export/excel' : '/export'
+      const today = new Date().toISOString().split('T')[0]
+      const ext = format === 'excel' ? 'xlsx' : 'csv'
+      await downloadExport(
+        `/api/holdings${suffix}?${params.toString()}`,
+        `lookthrough_holdings_${today}.${ext}`,
+      )
+    } finally {
+      setIsExporting(false)
+    }
+  }
 
   // Debounce the search field — 300ms
   useEffect(() => {
@@ -326,23 +365,58 @@ export default function HoldingsPage() {
               </button>
             )}
 
-            {/* Results count */}
-            <span className="ml-auto text-sm text-secondary-500 whitespace-nowrap">
-              {isFetching && !isLoading ? (
-                <span className="text-secondary-400">Updating…</span>
-              ) : (
-                <>
-                  Showing{' '}
-                  <span className="font-medium text-secondary-700">
-                    {Math.min(filters.pageSize, total).toLocaleString()}
-                  </span>{' '}
-                  of{' '}
-                  <span className="font-medium text-secondary-700">
-                    {total.toLocaleString()}
-                  </span>
-                </>
-              )}
-            </span>
+            {/* Results count + Export */}
+            <div className="flex items-center gap-2 ml-auto">
+              <span className="text-sm text-secondary-500 whitespace-nowrap">
+                {isFetching && !isLoading ? (
+                  <span className="text-secondary-400">Updating…</span>
+                ) : (
+                  <>
+                    Showing{' '}
+                    <span className="font-medium text-secondary-700">
+                      {Math.min(filters.pageSize, total).toLocaleString()}
+                    </span>{' '}
+                    of{' '}
+                    <span className="font-medium text-secondary-700">
+                      {total.toLocaleString()}
+                    </span>
+                  </>
+                )}
+              </span>
+
+              {/* Export dropdown */}
+              <div className="relative" ref={exportRef}>
+                <button
+                  onClick={() => setExportOpen((o) => !o)}
+                  disabled={isExporting}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-secondary-700 border border-secondary-200 rounded-md bg-white hover:bg-secondary-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isExporting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  Export
+                  <ChevronDown className="h-3 w-3 text-secondary-400" />
+                </button>
+                {exportOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-secondary-200 rounded-md shadow-lg z-10">
+                    <button
+                      className="w-full text-left px-4 py-2.5 text-sm text-secondary-700 hover:bg-secondary-50 transition-colors rounded-t-md"
+                      onClick={() => handleExport('csv')}
+                    >
+                      Download CSV
+                    </button>
+                    <button
+                      className="w-full text-left px-4 py-2.5 text-sm text-secondary-700 hover:bg-secondary-50 transition-colors rounded-b-md border-t border-secondary-100"
+                      onClick={() => handleExport('excel')}
+                    >
+                      Download Excel
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>

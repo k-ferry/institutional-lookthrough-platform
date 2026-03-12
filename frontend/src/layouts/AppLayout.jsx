@@ -5,12 +5,14 @@ import {
   LayoutDashboard,
   Briefcase,
   Building2,
+  Globe,
   Bot,
   Settings,
   LogOut,
   ClipboardList,
   ScrollText,
   Activity,
+  BarChart2,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
@@ -18,6 +20,8 @@ const frontOfficeItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/holdings', label: 'Holdings', icon: Briefcase },
   { to: '/funds', label: 'Funds', icon: Building2 },
+  { to: '/gics', label: 'Sectors', icon: BarChart2 },
+  { to: '/geography', label: 'Geography', icon: Globe },
   { to: '/agent', label: 'AI Assistant', icon: Bot },
 ]
 
