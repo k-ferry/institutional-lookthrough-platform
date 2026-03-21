@@ -11,7 +11,8 @@ Usage:
     python run_pipeline.py --classify   # with AI classification (requires ANTHROPIC_API_KEY)
     python run_pipeline.py --classify --limit 50  # classify up to 50 companies
     python run_pipeline.py --13f        # with 13F SEC EDGAR ingestion
-    python run_pipeline.py --13f --classify  # both optional steps
+    python run_pipeline.py --pdf        # with PDF fund document ingestion
+    python run_pipeline.py --13f --pdf --classify  # all optional steps
 """
 import argparse
 import os
@@ -38,6 +39,12 @@ STEPS = [
         'cmd': [sys.executable, '-m', 'src.lookthrough.ingestion.parse_13f_filing'],
         'always': False,
         'flag': 'thirteenf',
+    },
+    {
+        'name': 'PDF Document Ingestion',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.ingestion.ingest_pdf_documents'],
+        'always': False,
+        'flag': 'pdf',
     },
     {
         'name': 'Entity Resolution',
@@ -93,6 +100,7 @@ def main():
     parser.add_argument('--limit', type=int, default=20, help='Max companies to classify (default: 20)')
     parser.add_argument('--csv', action='store_true', help='Use CSV mode instead of PostgreSQL')
     parser.add_argument('--13f', action='store_true', dest='thirteenf', help='Include 13F SEC EDGAR ingestion step')
+    parser.add_argument('--pdf', action='store_true', dest='pdf', help='Include PDF fund document ingestion step')
     args = parser.parse_args()
 
     # Set CSV_MODE environment variable so all modules can access it

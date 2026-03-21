@@ -25,11 +25,10 @@ import pandas as pd
 
 from src.lookthrough.db.repository import (
     _is_csv_mode,
-    bulk_insert,
     dataframe_to_records,
-    delete_all,
     ensure_tables,
     get_all,
+    get_filtered,
     upsert_rows,
 )
 from src.lookthrough.db.models import (
@@ -116,12 +115,22 @@ def load_synthetic_tables(csv_mode: bool = False) -> dict[str, Optional[pd.DataF
         "meta_taxonomy_version": MetaTaxonomyVersion,
     }
 
+    # These tables may hold rows from multiple ingestion sources (pdf_document,
+    # 13f_filing, bdc_filing, synthetic).  Load ONLY synthetic rows here so that
+    # load_sources never reads or re-writes rows owned by other ingestion steps.
+    # upsert_rows uses ON CONFLICT DO UPDATE, so non-synthetic rows already in the
+    # DB are completely untouched — they are neither read nor overwritten here.
+    SOURCE_FILTERED = {"dim_company", "dim_fund", "fact_fund_report", "fact_reported_holding"}
+
     tables = {}
     for filename in SYNTHETIC_TABLES:
         name = filename.replace(".csv", "")
         model = model_map.get(name)
         if model:
-            df = get_all(model)
+            if name in SOURCE_FILTERED:
+                df = get_filtered(model, {"source": SOURCE_SYNTHETIC})
+            else:
+                df = get_all(model)
             tables[name] = df if not df.empty else None
         else:
             tables[name] = None
@@ -231,13 +240,24 @@ def create_company_entries_for_bdc(
 def merge_companies(
     synthetic_companies: Optional[pd.DataFrame],
     bdc_holdings: Optional[pd.DataFrame],
+    all_existing_companies: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Merge synthetic companies with new BDC company entries."""
+    """Merge synthetic companies with new BDC company entries.
+
+    all_existing_companies: the full dim_company table (all sources) used only
+    for name-deduplication when creating BDC stubs.  Defaults to
+    synthetic_companies when not provided (CSV mode).
+    """
     synthetic_companies = add_source_column(synthetic_companies, SOURCE_SYNTHETIC)
 
     new_bdc_companies = pd.DataFrame()
     if bdc_holdings is not None and not bdc_holdings.empty:
-        new_bdc_companies = create_company_entries_for_bdc(bdc_holdings, synthetic_companies)
+        dedup_against = (
+            all_existing_companies
+            if all_existing_companies is not None
+            else synthetic_companies
+        )
+        new_bdc_companies = create_company_entries_for_bdc(bdc_holdings, dedup_against)
 
     dfs = [df for df in [synthetic_companies, new_bdc_companies] if df is not None and not df.empty]
     if not dfs:
@@ -384,9 +404,14 @@ def load_and_merge_sources(csv_mode: bool = False) -> dict[str, pd.DataFrame]:
     print("Merging fund reports...")
     merged_reports = merge_fund_reports(synthetic["fact_fund_report"], bdc["reports"])
 
-    # Merge companies (create new entries for BDC companies)
+    # Merge companies (create new entries for BDC companies).
+    # In DB mode, check ALL existing companies (not just synthetic) to avoid
+    # creating duplicate stubs for companies already ingested from PDF/13F sources.
     print("Merging companies...")
-    merged_companies = merge_companies(synthetic["dim_company"], bdc["holdings"])
+    all_existing_companies = get_all(DimCompany) if not csv_mode else None
+    merged_companies = merge_companies(
+        synthetic["dim_company"], bdc["holdings"], all_existing_companies
+    )
 
     # Merge holdings
     print("Merging holdings...")

@@ -31,6 +31,8 @@ from src.lookthrough.db.repository import (
     dataframe_to_records,
     delete_all,
     ensure_tables,
+    execute_update,
+    upsert_rows,
 )
 from src.lookthrough.db.models import (
     DimCompany,
@@ -506,14 +508,17 @@ def _write_to_db(
     # Ensure tables exist
     ensure_tables()
 
-    # Clear existing synthetic data (to allow re-runs)
-    # Delete in reverse dependency order
+    # Clear existing synthetic data (to allow re-runs).
+    # Delete in reverse dependency order.
+    # Mixed-source tables: only delete rows where source='synthetic' so that
+    # PDF, 13F, and BDC rows ingested by other pipeline steps are preserved.
+    # Purely-synthetic tables: delete_all is safe (no other source writes to them).
     print("  Clearing existing synthetic data...")
-    delete_all(FactReportedHolding)
-    delete_all(FactFundReport)
+    execute_update("DELETE FROM fact_reported_holding WHERE source = 'synthetic'")
+    execute_update("DELETE FROM fact_fund_report WHERE source = 'synthetic'")
     delete_all(DimEntityAlias)
-    delete_all(DimCompany)
-    delete_all(DimFund)
+    execute_update("DELETE FROM dim_company WHERE source = 'synthetic'")
+    execute_update("DELETE FROM dim_fund WHERE source = 'synthetic'")
     delete_all(DimPortfolio)
     delete_all(DimTaxonomyNode)
     delete_all(MetaTaxonomyVersion)
@@ -529,20 +534,20 @@ def _write_to_db(
     bulk_insert(DimPortfolio, dataframe_to_records(portfolio_df))
 
     print("  Inserting dim_fund...")
-    bulk_insert(DimFund, dataframe_to_records(funds_df))
+    upsert_rows(DimFund, dataframe_to_records(funds_df), ['fund_id'])
 
     print("  Inserting dim_company...")
-    bulk_insert(DimCompany, dataframe_to_records(companies_df))
+    upsert_rows(DimCompany, dataframe_to_records(companies_df), ['company_id'])
 
     print("  Inserting dim_entity_alias...")
     if not aliases_df.empty:
         bulk_insert(DimEntityAlias, dataframe_to_records(aliases_df))
 
     print("  Inserting fact_fund_report...")
-    bulk_insert(FactFundReport, dataframe_to_records(reports_df))
+    upsert_rows(FactFundReport, dataframe_to_records(reports_df), ['fund_report_id'])
 
     print("  Inserting fact_reported_holding...")
-    bulk_insert(FactReportedHolding, dataframe_to_records(holdings_df))
+    upsert_rows(FactReportedHolding, dataframe_to_records(holdings_df), ['reported_holding_id'])
 
 
 def _write_to_csv(

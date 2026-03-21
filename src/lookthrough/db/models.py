@@ -143,6 +143,12 @@ class FactFundReport(Base):
     document_id: Mapped[str] = mapped_column(String(36), nullable=True)
     coverage_estimate: Mapped[float] = mapped_column(Float, nullable=True)
     nav_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    lp_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    irr_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    moic: Mapped[float] = mapped_column(Float, nullable=True)
+    contributions_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    distributions_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    unfunded_commitment_usd: Mapped[float] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=True)
 
 
@@ -167,6 +173,8 @@ class FactReportedHolding(Base):
     row_number: Mapped[float] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=True)
     as_of_date: Mapped[str] = mapped_column(String(20), nullable=True)
+    cost_basis_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    ownership_pct: Mapped[float] = mapped_column(Float, nullable=True)
 
 
 # =============================================================================
