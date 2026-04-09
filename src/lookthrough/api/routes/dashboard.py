@@ -4,8 +4,9 @@ import csv
 import io
 import math
 from datetime import date, datetime
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
@@ -39,25 +40,70 @@ def get_stats(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Return top-level portfolio statistics."""
+    """Return top-level portfolio statistics with source breakdown."""
     total_holdings = (
         db.query(func.count(FactReportedHolding.reported_holding_id)).scalar() or 0
     )
-    total_companies = db.query(func.count(DimCompany.company_id)).scalar() or 0
-    total_funds = db.query(func.count(DimFund.fund_id)).scalar() or 0
-    total_aum = (
+    total_exposure = (
         db.query(func.sum(FactReportedHolding.reported_value_usd)).scalar() or 0.0
     )
-    data_sources = (
-        db.query(func.count(distinct(FactReportedHolding.source))).scalar() or 0
+    fund_count = db.query(func.count(DimFund.fund_id)).scalar() or 0
+    company_count = db.query(func.count(DimCompany.company_id)).scalar() or 0
+    quarter_count = (
+        db.query(func.count(distinct(FactReportedHolding.as_of_date)))
+        .filter(FactReportedHolding.as_of_date.isnot(None))
+        .scalar()
+        or 0
     )
 
+    # Classification coverage: companies with a non-null primary_sector
+    classified = (
+        db.query(func.count(DimCompany.company_id))
+        .filter(DimCompany.primary_sector.isnot(None))
+        .scalar()
+        or 0
+    )
+    classification_coverage_pct = (
+        round(classified / company_count * 100, 1) if company_count > 0 else 0.0
+    )
+
+    # Per-source breakdown
+    source_rows = (
+        db.query(
+            FactReportedHolding.source,
+            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.count(distinct(FactFundReport.fund_id)).label("fund_count"),
+            func.max(FactReportedHolding.as_of_date).label("latest_as_of_date"),
+        )
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .filter(FactReportedHolding.source.isnot(None))
+        .group_by(FactReportedHolding.source)
+        .all()
+    )
+    source_breakdown = [
+        {
+            "source": r.source,
+            "holding_count": r.holding_count,
+            "fund_count": r.fund_count,
+            "latest_as_of_date": r.latest_as_of_date,
+        }
+        for r in source_rows
+    ]
+
     return {
+        # New fields
+        "total_exposure_usd": float(total_exposure),
+        "fund_count": fund_count,
+        "company_count": company_count,
+        "quarter_count": quarter_count,
+        "classification_coverage_pct": classification_coverage_pct,
+        "source_breakdown": source_breakdown,
+        # Backward-compat aliases
         "total_holdings": total_holdings,
-        "total_companies": total_companies,
-        "total_funds": total_funds,
-        "total_aum": float(total_aum),
-        "data_sources": data_sources,
+        "total_aum": float(total_exposure),
+        "total_companies": company_count,
+        "total_funds": fund_count,
+        "data_sources": len(source_breakdown),
     }
 
 
@@ -330,6 +376,100 @@ def _build_trend_response(
     return {"dates": quarters, "series": series}
 
 
+def _build_portfolio_trend_response(
+    db: Session,
+    dimension_type: str,
+    periods: int,
+) -> dict:
+    """Portfolio-level trend built directly from holdings — works across ALL sources.
+
+    Queries fact_reported_holding rather than fact_aggregation_snapshot so that
+    BDC, 13F, PDF, and synthetic data are all included.
+    """
+    # Last `periods` distinct as_of_dates that have value data
+    date_rows = (
+        db.query(FactReportedHolding.as_of_date)
+        .filter(
+            FactReportedHolding.as_of_date.isnot(None),
+            FactReportedHolding.reported_value_usd.isnot(None),
+        )
+        .distinct()
+        .order_by(FactReportedHolding.as_of_date.desc())
+        .limit(periods)
+        .all()
+    )
+    date_list = sorted([r[0] for r in date_rows])
+
+    if not date_list:
+        return {"dates": [], "series": []}
+
+    if dimension_type == "geography":
+        dim_col = func.coalesce(
+            DimCompany.primary_country,
+            FactReportedHolding.reported_country,
+            "Unknown",
+        )
+    else:  # sector (default)
+        dim_col = func.coalesce(DimCompany.primary_sector, "Unclassified")
+
+    rows = (
+        db.query(
+            FactReportedHolding.as_of_date,
+            dim_col.label("dim_name"),
+            func.sum(FactReportedHolding.reported_value_usd).label("value"),
+        )
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .filter(
+            FactReportedHolding.as_of_date.in_(date_list),
+            FactReportedHolding.reported_value_usd.isnot(None),
+        )
+        .group_by(FactReportedHolding.as_of_date, dim_col)
+        .order_by(FactReportedHolding.as_of_date)
+        .all()
+    )
+
+    date_totals: dict[str, float] = {}
+    name_date_value: dict[str, dict[str, float]] = {}
+    for as_of_date, name, value in rows:
+        v = float(value) if value else 0.0
+        date_totals[as_of_date] = date_totals.get(as_of_date, 0.0) + v
+        if name not in name_date_value:
+            name_date_value[name] = {}
+        name_date_value[name][as_of_date] = v
+
+    name_avg: dict[str, float] = {}
+    for name, date_vals in name_date_value.items():
+        pcts = []
+        for d in date_list:
+            total = date_totals.get(d, 1.0) or 1.0
+            pcts.append(date_vals.get(d, 0.0) / total * 100)
+        name_avg[name] = sum(pcts) / len(pcts) if pcts else 0.0
+
+    sorted_names = sorted(name_avg, key=lambda n: name_avg[n], reverse=True)
+    top6 = sorted_names[:6]
+    others = sorted_names[6:]
+
+    series: list[dict] = []
+    for name in top6:
+        data = []
+        for d in date_list:
+            total = date_totals.get(d, 1.0) or 1.0
+            pct = name_date_value.get(name, {}).get(d, 0.0) / total * 100
+            data.append(round(pct, 2))
+        series.append({"name": name, "data": data})
+
+    if others:
+        other_data = []
+        for d in date_list:
+            total = date_totals.get(d, 1.0) or 1.0
+            other_val = sum(name_date_value.get(n, {}).get(d, 0.0) for n in others)
+            other_data.append(round(other_val / total * 100, 2))
+        series.append({"name": "Other", "data": other_data})
+
+    quarters = [_date_to_quarter(d) for d in date_list]
+    return {"dates": quarters, "series": series}
+
+
 @router.get("/exposure-trend")
 def get_exposure_trend(
     dimension_type: str = "sector",
@@ -337,13 +477,8 @@ def get_exposure_trend(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Portfolio-level exposure trend over time.
-
-    Returns percentage allocations per taxonomy node across historical snapshots.
-    dimension_type: 'sector' | 'geography' | 'industry'
-    periods: number of most-recent snapshots to include (default 8)
-    """
-    return _build_trend_response(db, dimension_type, periods, fund_id="")
+    """Portfolio-level exposure trend — aggregates across ALL sources via raw holdings."""
+    return _build_portfolio_trend_response(db, dimension_type, periods)
 
 
 @router.get("/exposure-trend/fund/{fund_id}")
@@ -356,6 +491,73 @@ def get_exposure_trend_by_fund(
 ) -> dict:
     """Fund-scoped exposure trend over time."""
     return _build_trend_response(db, dimension_type, periods, fund_id=fund_id)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/funds-summary
+# ---------------------------------------------------------------------------
+
+
+@router.get("/funds-summary")
+def get_funds_summary(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> list:
+    """All funds with latest-quarter stats — ordered by total exposure DESC."""
+    latest_period_sq = (
+        db.query(
+            FactFundReport.fund_id.label("fund_id"),
+            func.max(FactFundReport.report_period_end).label("max_period"),
+        )
+        .group_by(FactFundReport.fund_id)
+        .subquery()
+    )
+
+    rows = (
+        db.query(
+            DimFund.fund_id,
+            DimFund.fund_name,
+            DimFund.fund_type,
+            DimFund.source,
+            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.sum(FactReportedHolding.reported_value_usd).label("total_exposure"),
+            func.count(
+                distinct(func.coalesce(DimCompany.primary_sector, "Unclassified"))
+            ).label("sector_count"),
+            latest_period_sq.c.max_period.label("latest_as_of_date"),
+        )
+        .join(latest_period_sq, latest_period_sq.c.fund_id == DimFund.fund_id)
+        .join(
+            FactFundReport,
+            (FactFundReport.fund_id == DimFund.fund_id)
+            & (FactFundReport.report_period_end == latest_period_sq.c.max_period),
+        )
+        .join(FactReportedHolding, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .group_by(
+            DimFund.fund_id,
+            DimFund.fund_name,
+            DimFund.fund_type,
+            DimFund.source,
+            latest_period_sq.c.max_period,
+        )
+        .order_by(func.sum(FactReportedHolding.reported_value_usd).desc().nullslast())
+        .all()
+    )
+
+    return [
+        {
+            "fund_id": row.fund_id,
+            "fund_name": row.fund_name,
+            "fund_type": row.fund_type,
+            "source": row.source,
+            "holding_count": row.holding_count,
+            "total_exposure_usd": float(row.total_exposure) if row.total_exposure else None,
+            "sector_count": row.sector_count or 0,
+            "latest_as_of_date": row.latest_as_of_date,
+        }
+        for row in rows
+    ]
 
 
 # ===========================================================================
@@ -375,7 +577,17 @@ def list_funds(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> list:
-    """List all funds with holding count and total value."""
+    """List all funds with holding count (latest quarter) and metadata."""
+    # Subquery: latest report_period_end per fund
+    latest_period_sq = (
+        db.query(
+            FactFundReport.fund_id.label("fund_id"),
+            func.max(FactFundReport.report_period_end).label("max_period"),
+        )
+        .group_by(FactFundReport.fund_id)
+        .subquery()
+    )
+
     rows = (
         db.query(
             DimFund.fund_id,
@@ -388,8 +600,14 @@ def list_funds(
             DimFund.source,
             func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
             func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            latest_period_sq.c.max_period.label("latest_as_of_date"),
         )
-        .join(FactFundReport, FactFundReport.fund_id == DimFund.fund_id)
+        .join(latest_period_sq, latest_period_sq.c.fund_id == DimFund.fund_id)
+        .join(
+            FactFundReport,
+            (FactFundReport.fund_id == DimFund.fund_id)
+            & (FactFundReport.report_period_end == latest_period_sq.c.max_period),
+        )
         .join(
             FactReportedHolding,
             FactReportedHolding.fund_report_id == FactFundReport.fund_report_id,
@@ -403,6 +621,7 @@ def list_funds(
             DimFund.vintage_year,
             DimFund.base_currency,
             DimFund.source,
+            latest_period_sq.c.max_period,
         )
         .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
         .all()
@@ -415,12 +634,140 @@ def list_funds(
             "manager_name": row.manager_name,
             "fund_type": row.fund_type,
             "strategy": row.strategy,
+            "source": row.source,
             "vintage_year": int(row.vintage_year) if row.vintage_year is not None else None,
             "holding_count": row.holding_count,
             "total_value": float(row.total_value) if row.total_value is not None else None,
+            "latest_as_of_date": row.latest_as_of_date,
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/funds/allocation
+# ---------------------------------------------------------------------------
+
+
+@funds_router.get("/allocation")
+def get_fund_allocation(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Portfolio allocation by fund type and individual fund (latest quarter)."""
+    latest_period_sq = (
+        db.query(
+            FactFundReport.fund_id.label("fund_id"),
+            func.max(FactFundReport.report_period_end).label("max_period"),
+        )
+        .group_by(FactFundReport.fund_id)
+        .subquery()
+    )
+
+    fund_rows = (
+        db.query(
+            DimFund.fund_id,
+            DimFund.fund_name,
+            DimFund.fund_type,
+            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.sum(FactReportedHolding.reported_value_usd).label("total_exposure"),
+            latest_period_sq.c.max_period.label("latest_as_of_date"),
+        )
+        .join(latest_period_sq, latest_period_sq.c.fund_id == DimFund.fund_id)
+        .join(
+            FactFundReport,
+            (FactFundReport.fund_id == DimFund.fund_id)
+            & (FactFundReport.report_period_end == latest_period_sq.c.max_period),
+        )
+        .join(FactReportedHolding, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .group_by(
+            DimFund.fund_id,
+            DimFund.fund_name,
+            DimFund.fund_type,
+            latest_period_sq.c.max_period,
+        )
+        .order_by(func.sum(FactReportedHolding.reported_value_usd).desc().nullslast())
+        .all()
+    )
+
+    total_portfolio = sum(
+        float(r.total_exposure) for r in fund_rows if r.total_exposure
+    )
+
+    # Per-fund, per-sector totals (latest quarter) — used for top_sectors
+    sector_rows = (
+        db.query(
+            FactFundReport.fund_id.label("fund_id"),
+            func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
+            func.sum(FactReportedHolding.reported_value_usd).label("sector_value"),
+        )
+        .join(FactReportedHolding, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .join(
+            latest_period_sq,
+            (latest_period_sq.c.fund_id == FactFundReport.fund_id)
+            & (latest_period_sq.c.max_period == FactFundReport.report_period_end),
+        )
+        .group_by(
+            FactFundReport.fund_id,
+            func.coalesce(DimCompany.primary_sector, "Unclassified"),
+        )
+        .all()
+    )
+
+    # Build top-3 sectors per fund (by value, excluding Unclassified)
+    from collections import defaultdict as _defaultdict
+    fund_sector_values: dict = _defaultdict(list)
+    for row in sector_rows:
+        fund_sector_values[row.fund_id].append(
+            (row.sector, float(row.sector_value) if row.sector_value else 0.0)
+        )
+    fund_top_sectors: dict = {}
+    for fid, pairs in fund_sector_values.items():
+        pairs.sort(key=lambda x: -x[1])
+        fund_top_sectors[fid] = [s for s, _ in pairs if s != "Unclassified"][:3]
+
+    by_fund = [
+        {
+            "fund_id": r.fund_id,
+            "fund_name": r.fund_name,
+            "fund_type": r.fund_type,
+            "total_exposure_usd": float(r.total_exposure) if r.total_exposure else None,
+            "pct_of_portfolio": (
+                round(float(r.total_exposure) / total_portfolio * 100, 2)
+                if r.total_exposure and total_portfolio > 0
+                else 0.0
+            ),
+            "holding_count": r.holding_count,
+            "top_sectors": fund_top_sectors.get(r.fund_id, []),
+            "latest_as_of_date": r.latest_as_of_date,
+        }
+        for r in fund_rows
+    ]
+
+    # Aggregate by fund_type
+    type_totals: dict = {}
+    type_counts: dict = {}
+    for f in by_fund:
+        t = f["fund_type"] or "Other"
+        type_totals[t] = type_totals.get(t, 0.0) + (f["total_exposure_usd"] or 0.0)
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    by_type = [
+        {
+            "fund_type": t,
+            "total_exposure_usd": round(v, 2),
+            "pct_of_portfolio": round(v / total_portfolio * 100, 2) if total_portfolio > 0 else 0.0,
+            "fund_count": type_counts[t],
+        }
+        for t, v in sorted(type_totals.items(), key=lambda x: -x[1])
+    ]
+
+    return {
+        "total_portfolio_exposure": total_portfolio,
+        "by_type": by_type,
+        "by_fund": by_fund,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +860,131 @@ def export_fund_holdings_csv(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/funds/{fund_id}/holdings — paginated, latest quarter
+# ---------------------------------------------------------------------------
+
+
+@funds_router.get("/{fund_id}/holdings")
+def list_fund_holdings(
+    fund_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None),
+    sort_by: str = Query("reported_value_usd"),
+    sort_dir: str = Query("desc"),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Paginated holdings for a fund, scoped to the latest quarter."""
+    fund = db.query(DimFund).filter(DimFund.fund_id == fund_id).first()
+    if fund is None:
+        raise HTTPException(status_code=404, detail="Fund not found")
+
+    latest_period = (
+        db.query(func.max(FactFundReport.report_period_end))
+        .filter(FactFundReport.fund_id == fund_id)
+        .scalar()
+    )
+    if latest_period is None:
+        return {"items": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 1}
+
+    fund_total = (
+        db.query(func.sum(FactReportedHolding.reported_value_usd))
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .filter(
+            FactFundReport.fund_id == fund_id,
+            FactFundReport.report_period_end == latest_period,
+        )
+        .scalar()
+    )
+    fund_total_float = float(fund_total) if fund_total else 0.0
+
+    company_name_col = func.coalesce(DimCompany.company_name, FactReportedHolding.raw_company_name)
+    sector_col = func.coalesce(DimCompany.primary_sector, "Unclassified")
+    country_col = func.coalesce(DimCompany.primary_country, FactReportedHolding.reported_country, "Unknown")
+
+    q = (
+        db.query(
+            FactReportedHolding.reported_holding_id,
+            FactReportedHolding.company_id,
+            company_name_col.label("company_name"),
+            sector_col.label("sector"),
+            DimCompany.primary_industry.label("industry"),
+            country_col.label("country"),
+            FactReportedHolding.reported_value_usd,
+            FactReportedHolding.as_of_date,
+            FactReportedHolding.source,
+        )
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .filter(
+            FactFundReport.fund_id == fund_id,
+            FactFundReport.report_period_end == latest_period,
+        )
+    )
+
+    if search:
+        q = q.filter(company_name_col.ilike(f"%{search}%"))
+
+    sort_col_map = {
+        "reported_value_usd": FactReportedHolding.reported_value_usd,
+        "company_name": company_name_col,
+        "sector": sector_col,
+    }
+    col = sort_col_map.get(sort_by, FactReportedHolding.reported_value_usd)
+    q = q.order_by(col.desc().nullslast() if sort_dir != "asc" else col.asc().nullslast())
+
+    total = q.count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    rows = q.offset((page - 1) * page_size).limit(page_size).all()
+
+    items = [
+        {
+            "holding_id": row.reported_holding_id,
+            "company_id": row.company_id,
+            "company_name": row.company_name,
+            "sector": row.sector or "Unclassified",
+            "industry": row.industry or "Unclassified",
+            "country": row.country or "Unknown",
+            "reported_value_usd": float(row.reported_value_usd) if row.reported_value_usd is not None else None,
+            "pct_of_fund": (
+                round(float(row.reported_value_usd) / fund_total_float * 100, 2)
+                if row.reported_value_usd is not None and fund_total_float > 0
+                else None
+            ),
+            "as_of_date": row.as_of_date,
+            "source": row.source,
+        }
+        for row in rows
+    ]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/funds/{fund_id}/exposure-trend
+# ---------------------------------------------------------------------------
+
+
+@funds_router.get("/{fund_id}/exposure-trend")
+def get_fund_exposure_trend(
+    fund_id: str,
+    dimension_type: str = Query("sector"),
+    periods: int = Query(8),
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Fund-scoped exposure trend over time (sector or geography)."""
+    return _build_trend_response(db, dimension_type, periods, fund_id=fund_id)
+
+
+# ---------------------------------------------------------------------------
 # GET /api/funds/{fund_id}
 # ---------------------------------------------------------------------------
 
@@ -523,78 +995,173 @@ def get_fund_detail(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Full fund profile: metadata, stats, sector breakdown, and top 10 holdings."""
+    """Full fund profile: metadata, stats, sector/industry/geography breakdowns, top 15 holdings."""
     fund = db.query(DimFund).filter(DimFund.fund_id == fund_id).first()
     if fund is None:
         raise HTTPException(status_code=404, detail="Fund not found")
 
-    # ---- Stats scoped to this fund ----
-    stats = (
-        db.query(
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
-            func.count(distinct(FactReportedHolding.company_id)).label("unique_companies"),
-            func.max(FactReportedHolding.as_of_date).label("as_of_date"),
-        )
-        .join(
-            FactFundReport,
-            FactReportedHolding.fund_report_id == FactFundReport.fund_report_id,
-        )
+    # Latest report period for this fund
+    latest_period = (
+        db.query(func.max(FactFundReport.report_period_end))
         .filter(FactFundReport.fund_id == fund_id)
-        .one()
+        .scalar()
     )
 
-    holding_count = stats.holding_count or 0
-    total_value = float(stats.total_value) if stats.total_value is not None else None
+    # Total distinct quarters for this fund (used by frontend to show BDC banner)
+    quarter_count = (
+        db.query(func.count(distinct(FactFundReport.report_period_end)))
+        .filter(FactFundReport.fund_id == fund_id)
+        .scalar()
+        or 0
+    )
 
-    # ---- Sector breakdown for this fund (top 10 by holding count) ----
-    sector_rows = (
+    # ---- Stats scoped to latest quarter ----
+    stats_q = (
+        db.query(
+            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.sum(FactReportedHolding.reported_value_usd).label("total_exposure"),
+        )
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .filter(FactFundReport.fund_id == fund_id)
+    )
+    if latest_period:
+        stats_q = stats_q.filter(FactFundReport.report_period_end == latest_period)
+    stats = stats_q.one()
+
+    holding_count = stats.holding_count or 0
+    total_exposure = float(stats.total_exposure) if stats.total_exposure else 0.0
+
+    # ---- Sector breakdown by value, latest quarter ----
+    sector_q = (
         db.query(
             func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.sum(FactReportedHolding.reported_value_usd).label("value_usd"),
         )
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .join(
-            FactFundReport,
-            FactReportedHolding.fund_report_id == FactFundReport.fund_report_id,
-        )
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
         .filter(FactFundReport.fund_id == fund_id)
+    )
+    if latest_period:
+        sector_q = sector_q.filter(FactFundReport.report_period_end == latest_period)
+    sector_rows = (
+        sector_q
         .group_by(func.coalesce(DimCompany.primary_sector, "Unclassified"))
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
-        .limit(10)
+        .order_by(func.sum(FactReportedHolding.reported_value_usd).desc().nullslast())
         .all()
     )
 
     sector_breakdown = [
         {
             "sector": row.sector,
-            "holding_count": row.holding_count,
-            "percentage": round(row.holding_count / holding_count * 100, 2) if holding_count else 0,
+            "value_usd": float(row.value_usd) if row.value_usd else 0.0,
+            "pct": (
+                round(float(row.value_usd) / total_exposure * 100, 2)
+                if row.value_usd and total_exposure > 0
+                else 0.0
+            ),
         }
         for row in sector_rows
     ]
 
-    # ---- Top 10 holdings by reported value ----
-    top_holding_rows = (
+    # ---- Industry breakdown (top 15 by value), latest quarter ----
+    industry_q = (
         db.query(
-            FactReportedHolding.company_id,
-            func.coalesce(
-                DimCompany.company_name, FactReportedHolding.raw_company_name
-            ).label("company_name"),
-            FactReportedHolding.reported_value_usd,
-            FactReportedHolding.reported_sector,
+            func.coalesce(DimCompany.primary_industry, "Unclassified").label("industry"),
+            func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
+            func.sum(FactReportedHolding.reported_value_usd).label("value_usd"),
         )
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .join(
-            FactFundReport,
-            FactReportedHolding.fund_report_id == FactFundReport.fund_report_id,
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .filter(FactFundReport.fund_id == fund_id)
+    )
+    if latest_period:
+        industry_q = industry_q.filter(FactFundReport.report_period_end == latest_period)
+    industry_rows = (
+        industry_q
+        .group_by(
+            func.coalesce(DimCompany.primary_industry, "Unclassified"),
+            func.coalesce(DimCompany.primary_sector, "Unclassified"),
         )
+        .order_by(func.sum(FactReportedHolding.reported_value_usd).desc().nullslast())
+        .limit(15)
+        .all()
+    )
+
+    industry_breakdown = [
+        {
+            "industry": row.industry,
+            "sector": row.sector,
+            "value_usd": float(row.value_usd) if row.value_usd else 0.0,
+            "pct": (
+                round(float(row.value_usd) / total_exposure * 100, 2)
+                if row.value_usd and total_exposure > 0
+                else 0.0
+            ),
+        }
+        for row in industry_rows
+    ]
+
+    # ---- Geography breakdown by value, latest quarter ----
+    country_col = func.coalesce(
+        DimCompany.primary_country,
+        FactReportedHolding.reported_country,
+        "Unknown",
+    )
+    geo_q = (
+        db.query(
+            country_col.label("country"),
+            func.sum(FactReportedHolding.reported_value_usd).label("value_usd"),
+        )
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .filter(FactFundReport.fund_id == fund_id)
+    )
+    if latest_period:
+        geo_q = geo_q.filter(FactFundReport.report_period_end == latest_period)
+    geo_rows = (
+        geo_q
+        .group_by(country_col)
+        .order_by(func.sum(FactReportedHolding.reported_value_usd).desc().nullslast())
+        .all()
+    )
+
+    geography_breakdown = [
+        {
+            "country": row.country,
+            "value_usd": float(row.value_usd) if row.value_usd else 0.0,
+            "pct": (
+                round(float(row.value_usd) / total_exposure * 100, 2)
+                if row.value_usd and total_exposure > 0
+                else 0.0
+            ),
+        }
+        for row in geo_rows
+    ]
+
+    # ---- Top 15 holdings by value, latest quarter ----
+    company_name_col = func.coalesce(DimCompany.company_name, FactReportedHolding.raw_company_name)
+    top_q = (
+        db.query(
+            FactReportedHolding.company_id,
+            company_name_col.label("company_name"),
+            func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
+            func.coalesce(DimCompany.primary_industry, "Unclassified").label("industry"),
+            FactReportedHolding.reported_value_usd,
+            FactReportedHolding.as_of_date,
+        )
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
         .filter(
             FactFundReport.fund_id == fund_id,
             FactReportedHolding.reported_value_usd.isnot(None),
         )
+    )
+    if latest_period:
+        top_q = top_q.filter(FactFundReport.report_period_end == latest_period)
+    top_rows = (
+        top_q
         .order_by(FactReportedHolding.reported_value_usd.desc())
-        .limit(10)
+        .limit(15)
         .all()
     )
 
@@ -602,15 +1169,17 @@ def get_fund_detail(
         {
             "company_id": row.company_id,
             "company_name": row.company_name,
+            "sector": row.sector,
+            "industry": row.industry,
             "reported_value_usd": float(row.reported_value_usd),
-            "reported_sector": row.reported_sector,
-            "pct_nav": (
-                round(float(row.reported_value_usd) / total_value * 100, 2)
-                if total_value
+            "pct_of_fund": (
+                round(float(row.reported_value_usd) / total_exposure * 100, 2)
+                if total_exposure > 0
                 else None
             ),
+            "as_of_date": row.as_of_date,
         }
-        for row in top_holding_rows
+        for row in top_rows
     ]
 
     return {
@@ -619,14 +1188,20 @@ def get_fund_detail(
         "manager_name": fund.manager_name,
         "fund_type": fund.fund_type,
         "strategy": fund.strategy,
-        "vintage_year": int(fund.vintage_year) if (fund.vintage_year is not None and not math.isnan(fund.vintage_year)) else None,
-        "base_currency": fund.base_currency,
         "source": fund.source,
+        "vintage_year": (
+            int(fund.vintage_year)
+            if fund.vintage_year is not None and not math.isnan(fund.vintage_year)
+            else None
+        ),
+        "base_currency": fund.base_currency,
+        "latest_as_of_date": latest_period,
+        "quarter_count": quarter_count,
         "holding_count": holding_count,
-        "total_value": total_value,
-        "unique_companies": stats.unique_companies or 0,
-        "as_of_date": stats.as_of_date,
+        "total_exposure_usd": total_exposure if total_exposure > 0 else None,
         "sector_breakdown": sector_breakdown,
+        "industry_breakdown": industry_breakdown,
+        "geography_breakdown": geography_breakdown,
         "top_holdings": top_holdings,
     }
 
@@ -672,15 +1247,12 @@ def get_company_detail(
         }
 
     # ---- Entity resolution log ----
-    # entity_resolution_log is keyed by reported_holding_id, not company_id.
-    # Step 1: collect all holding IDs for this company.
     holding_id_rows = (
         db.query(FactReportedHolding.reported_holding_id)
         .filter(FactReportedHolding.company_id == company_id)
         .all()
     )
     holding_ids = [r.reported_holding_id for r in holding_id_rows]
-    # Step 2: look up resolution records by those holding IDs.
     resolution_rows = []
     if holding_ids:
         resolution_rows = (

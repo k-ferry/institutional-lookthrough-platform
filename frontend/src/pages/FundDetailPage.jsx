@@ -6,6 +6,7 @@ import {
   Area,
   BarChart,
   Bar,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -18,7 +19,7 @@ import {
   ArrowLeft,
   Briefcase,
   DollarSign,
-  Building2,
+  BarChart2,
   CalendarDays,
   Search,
   X,
@@ -27,6 +28,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   AlertCircle,
+  Info,
   Download,
   Loader2,
 } from 'lucide-react'
@@ -58,7 +60,35 @@ function formatCurrency(value) {
   return `$${value.toLocaleString()}`
 }
 
-const SECTOR_COLORS = {
+// Fund type → badge classes
+const FUND_TYPE_CLASSES = {
+  PE: 'bg-blue-900 text-white',
+  VC: 'bg-blue-600 text-white',
+  hedge: 'bg-purple-700 text-white',
+  credit: 'bg-teal-600 text-white',
+  BDC: 'bg-emerald-600 text-white',
+  ETF: 'bg-sky-200 text-sky-900',
+  synthetic: 'bg-gray-500 text-white',
+}
+
+// Source → verbose description (subtle metadata only)
+const SOURCE_VERBOSE = {
+  pdf_document: 'Private fund documents (PDF)',
+  '13f_filing':  'SEC Form 13F',
+  bdc_filing:    'BDC 10-K filing',
+  synthetic:     'Synthetic data',
+}
+
+function fundTypeBadgeClasses(type) {
+  if (!type) return 'bg-gray-200 text-gray-700'
+  for (const [key, cls] of Object.entries(FUND_TYPE_CLASSES)) {
+    if (type.toLowerCase() === key.toLowerCase()) return cls
+  }
+  return 'bg-gray-200 text-gray-700'
+}
+
+// Sector → chip classes (for small inline chips)
+const SECTOR_CHIP_COLORS = {
   Financials: 'bg-blue-100 text-blue-800',
   Finance: 'bg-blue-100 text-blue-800',
   Healthcare: 'bg-green-100 text-green-800',
@@ -73,24 +103,56 @@ const SECTOR_COLORS = {
   Materials: 'bg-lime-100 text-lime-800',
   Utilities: 'bg-cyan-100 text-cyan-800',
   'Communication Services': 'bg-indigo-100 text-indigo-800',
+  Unclassified: 'bg-gray-100 text-gray-500',
 }
 
-function sectorClasses(sector) {
-  if (!sector) return 'bg-gray-100 text-gray-600'
-  for (const [key, cls] of Object.entries(SECTOR_COLORS)) {
+function sectorChipClasses(sector) {
+  if (!sector || sector === 'Unclassified') return 'bg-gray-100 text-gray-500'
+  for (const [key, cls] of Object.entries(SECTOR_CHIP_COLORS)) {
     if (sector.toLowerCase().includes(key.toLowerCase())) return cls
   }
-  return 'bg-gray-100 text-gray-600'
+  return 'bg-gray-100 text-gray-500'
 }
 
-function buildHoldingsUrl(fundId, filters) {
+// Sector → chart hex color (for bar/area charts)
+const SECTOR_CHART_COLORS = {
+  Financials: '#3b82f6',
+  Finance: '#3b82f6',
+  'Information Technology': '#8b5cf6',
+  Technology: '#8b5cf6',
+  'Health Care': '#10b981',
+  Healthcare: '#10b981',
+  Energy: '#f59e0b',
+  Industrials: '#64748b',
+  'Consumer Discretionary': '#ec4899',
+  'Consumer Staples': '#059669',
+  Materials: '#84cc16',
+  Utilities: '#06b6d4',
+  'Communication Services': '#6366f1',
+  'Real Estate': '#eab308',
+  Unclassified: '#9ca3af',
+}
+
+function sectorChartColor(sector) {
+  if (!sector) return '#9ca3af'
+  for (const [key, color] of Object.entries(SECTOR_CHART_COLORS)) {
+    if (sector.toLowerCase().includes(key.toLowerCase())) return color
+  }
+  return '#94a3b8'
+}
+
+const TREND_COLORS = [
+  '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
+]
+
+function buildFundHoldingsUrl(fundId, filters) {
   const p = new URLSearchParams()
   p.set('page', String(filters.page))
   p.set('page_size', '50')
-  p.set('fund_id', fundId)
   if (filters.search) p.set('search', filters.search)
-  if (filters.hasValue) p.set('has_value', 'true')
-  return `/api/holdings?${p.toString()}`
+  if (filters.sortBy) p.set('sort_by', filters.sortBy)
+  if (filters.sortDir) p.set('sort_dir', filters.sortDir)
+  return `/api/funds/${fundId}/holdings?${p.toString()}`
 }
 
 // ---------------------------------------------------------------------------
@@ -111,12 +173,12 @@ function StatCard({ title, value, icon: Icon, description }) {
     <Card>
       <CardContent className="p-6">
         <div className="flex items-center justify-between">
-          <div>
+          <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-secondary-500">{title}</p>
-            <p className="text-2xl font-bold text-secondary-900 mt-1">{value ?? '—'}</p>
+            <p className="text-2xl font-bold text-secondary-900 mt-1 truncate">{value ?? '—'}</p>
             {description && <p className="text-xs text-secondary-400 mt-1">{description}</p>}
           </div>
-          <div className="h-12 w-12 rounded-full bg-primary-50 flex items-center justify-center">
+          <div className="h-12 w-12 rounded-full bg-primary-50 flex items-center justify-center shrink-0 ml-3">
             <Icon className="h-6 w-6 text-primary-600" />
           </div>
         </div>
@@ -125,61 +187,60 @@ function StatCard({ title, value, icon: Icon, description }) {
   )
 }
 
-const CHART_COLOR = '#1A4B9B'
+// Horizontal bar chart for sector or geography (by value_usd)
+function ValueBarChart({ data, height, colorFn }) {
+  if (!data?.length) {
+    return (
+      <div className="flex items-center justify-center text-secondary-400 text-sm" style={{ height }}>
+        No data available
+      </div>
+    )
+  }
 
-function SectorChart({ sectors }) {
-  const data = sectors.map((s) => ({
-    name: s.sector.length > 20 ? s.sector.slice(0, 18) + '…' : s.sector,
-    fullName: s.sector,
-    value: s.holding_count,
-    pct: s.percentage,
+  const chartData = data.map((d) => ({
+    name: d.name.length > 24 ? d.name.slice(0, 22) + '…' : d.name,
+    fullName: d.name,
+    value: d.value,
+    pct: d.pct,
+    sector: d.sector,
   }))
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <BarChart data={data} layout="vertical" margin={{ left: 8, right: 32, top: 4, bottom: 4 }}>
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 52, top: 4, bottom: 4 }}>
         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
         <XAxis
           type="number"
-          tick={{ fontSize: 11, fill: '#64748b' }}
+          tickFormatter={(v) => formatAUM(v)}
+          tick={{ fontSize: 10, fill: '#64748b' }}
           axisLine={false}
           tickLine={false}
-          label={{
-            value: 'Holdings',
-            position: 'insideBottomRight',
-            offset: -4,
-            fontSize: 10,
-            fill: '#94a3b8',
-          }}
         />
         <YAxis
           type="category"
           dataKey="name"
-          width={130}
+          width={148}
           tick={{ fontSize: 11, fill: '#475569' }}
           axisLine={false}
           tickLine={false}
         />
         <Tooltip
           formatter={(value, _name, props) => {
-            const { pct, fullName } = props.payload
-            return [`${value.toLocaleString()} holdings (${pct}%)`, fullName]
+            const { pct, fullName, sector } = props.payload
+            const label = sector && sector !== fullName ? `${fullName} · ${sector}` : fullName
+            return [`${formatCurrency(value)} (${pct}%)`, label]
           }}
           contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
         />
-        <Bar dataKey="value" fill={CHART_COLOR} radius={[0, 4, 4, 0]} maxBarSize={24} />
+        <Bar dataKey="value" radius={[0, 4, 4, 0]} maxBarSize={26}>
+          {chartData.map((entry, index) => (
+            <Cell key={index} fill={colorFn ? colorFn(entry) : '#1A4B9B'} />
+          ))}
+        </Bar>
       </BarChart>
     </ResponsiveContainer>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Exposure Trend Chart (fund-scoped)
-// ---------------------------------------------------------------------------
-
-const TREND_COLORS = [
-  '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
-]
 
 function ExposureTrendChart({ data, loading }) {
   if (loading) {
@@ -289,9 +350,8 @@ function Pagination({ page, totalPages, onPageChange }) {
 export default function FundDetailPage() {
   const { fund_id } = useParams()
   const [searchInput, setSearchInput] = useState('')
-  const [filters, setFilters] = useState({ search: '', hasValue: false, page: 1 })
+  const [filters, setFilters] = useState({ search: '', page: 1, sortBy: 'reported_value_usd', sortDir: 'desc' })
   const [isExporting, setIsExporting] = useState(false)
-  const [trendDim, setTrendDim] = useState('sector')
 
   async function handleExport() {
     setIsExporting(true)
@@ -306,7 +366,7 @@ export default function FundDetailPage() {
     }
   }
 
-  // Debounce search 300ms
+  // Debounce search 300 ms
   useEffect(() => {
     const t = setTimeout(() => {
       setFilters((prev) => ({ ...prev, search: searchInput, page: 1 }))
@@ -314,18 +374,12 @@ export default function FundDetailPage() {
     return () => clearTimeout(t)
   }, [searchInput])
 
-  const setFilter = useCallback((key, value) => {
-    setFilters((prev) => ({ ...prev, [key]: value, page: 1 }))
-  }, [])
-
-  const clearFilters = useCallback(() => {
+  const clearSearch = useCallback(() => {
     setSearchInput('')
-    setFilters({ search: '', hasValue: false, page: 1 })
+    setFilters((prev) => ({ ...prev, search: '', page: 1 }))
   }, [])
 
-  const hasActiveFilters = filters.search || filters.hasValue
-
-  // Fund detail query
+  // Fund detail
   const { data: fund, isLoading: fundLoading, error: fundError } = useQuery({
     queryKey: ['fund-detail', fund_id],
     queryFn: () => fetchJSON(`/api/funds/${fund_id}`),
@@ -333,21 +387,21 @@ export default function FundDetailPage() {
     retry: 1,
   })
 
+  // Exposure trend — only fetch if fund loaded and has multiple quarters
   const { data: trendData, isLoading: trendLoading } = useQuery({
-    queryKey: ['fund-exposure-trend', fund_id, trendDim],
-    queryFn: () =>
-      fetchJSON(
-        `/api/dashboard/exposure-trend/fund/${fund_id}?dimension_type=${trendDim}&periods=8`,
-      ),
-    enabled: !!fund_id,
+    queryKey: ['fund-exposure-trend', fund_id],
+    queryFn: () => fetchJSON(`/api/funds/${fund_id}/exposure-trend?dimension_type=sector&periods=8`),
+    enabled: !!fund_id && (fund?.quarter_count ?? 0) > 1,
+    staleTime: 5 * 60 * 1000,
   })
 
-  // Holdings for this fund
+  // Paginated holdings for latest quarter
   const { data: holdingsData, isLoading: holdingsLoading } = useQuery({
-    queryKey: ['fund-holdings', fund_id, filters.page, filters.search, filters.hasValue],
-    queryFn: () => fetchJSON(buildHoldingsUrl(fund_id, filters)),
+    queryKey: ['fund-holdings', fund_id, filters.page, filters.search, filters.sortBy, filters.sortDir],
+    queryFn: () => fetchJSON(buildFundHoldingsUrl(fund_id, filters)),
     placeholderData: (prev) => prev,
     staleTime: 2 * 60 * 1000,
+    enabled: !!fund_id,
   })
 
   const holdingsTotal = holdingsData?.total ?? 0
@@ -380,15 +434,37 @@ export default function FundDetailPage() {
           Portfolio Overview
         </Link>
         <ErrorBanner
-          message={
-            fundError ? `Failed to load fund: ${fundError.message}` : 'Fund not found.'
-          }
+          message={fundError ? `Failed to load fund: ${fundError.message}` : 'Fund not found.'}
         />
       </div>
     )
   }
 
-  const metaTags = [fund.fund_type, fund.strategy].filter(Boolean)
+  const isSingleQuarter = (fund.quarter_count ?? 0) <= 1
+  const sectorCount = fund.sector_breakdown?.length ?? 0
+  const hasGeography = fund.geography_breakdown?.some((g) => g.value_usd > 0) ?? false
+
+  // Prepare chart data
+  const sectorChartData = (fund.sector_breakdown ?? []).map((s) => ({
+    name: s.sector,
+    value: s.value_usd,
+    pct: s.pct,
+  }))
+
+  const industryChartData = (fund.industry_breakdown ?? []).map((ind) => ({
+    name: ind.industry,
+    value: ind.value_usd,
+    pct: ind.pct,
+    sector: ind.sector,
+  }))
+
+  const geoChartData = (fund.geography_breakdown ?? [])
+    .filter((g) => g.value_usd > 0)
+    .map((g) => ({
+      name: g.country,
+      value: g.value_usd,
+      pct: g.pct,
+    }))
 
   return (
     <div className="space-y-6">
@@ -404,34 +480,46 @@ export default function FundDetailPage() {
 
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-bold text-secondary-900">{fund.fund_name}</h1>
-        <div className="flex flex-wrap items-center gap-2">
-          {fund.manager_name && (
-            <span className="text-sm text-secondary-500">{fund.manager_name}</span>
-          )}
-          {fund.manager_name && metaTags.length > 0 && (
-            <span className="text-secondary-300">·</span>
-          )}
-          {metaTags.map((tag) => (
-            <span
-              key={tag}
-              className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-primary-50 text-primary-700 border border-primary-100"
-            >
-              {tag}
-            </span>
-          ))}
-          {fund.vintage_year && (
-            <span className="text-xs text-secondary-400">Vintage {fund.vintage_year}</span>
-          )}
-          {fund.base_currency && (
-            <span className="text-xs text-secondary-400">{fund.base_currency}</span>
-          )}
+        <div className="flex flex-col gap-2 min-w-0">
+          <h1 className="text-2xl font-bold text-secondary-900 truncate">{fund.fund_name}</h1>
+
+          {/* Badges + meta row */}
+          <div className="flex flex-wrap items-center gap-2">
+            {fund.fund_type && (
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${fundTypeBadgeClasses(fund.fund_type)}`}
+              >
+                {fund.fund_type}
+              </span>
+            )}
+            {fund.manager_name && (
+              <>
+                <span className="text-secondary-300">·</span>
+                <span className="text-sm text-secondary-500">{fund.manager_name}</span>
+              </>
+            )}
+            {fund.strategy && (
+              <>
+                <span className="text-secondary-300">·</span>
+                <span className="text-sm text-secondary-400">{fund.strategy}</span>
+              </>
+            )}
+            {fund.latest_as_of_date && (
+              <>
+                <span className="text-secondary-300">·</span>
+                <span className="text-xs text-secondary-400 flex items-center gap-1">
+                  <CalendarDays className="h-3 w-3" />
+                  {fund.latest_as_of_date}
+                </span>
+              </>
+            )}
+          </div>
           {fund.source && (
-            <span className="text-xs text-secondary-300 font-mono">{fund.source}</span>
+            <p style={{ fontSize: '11px' }} className="text-secondary-400 mt-0.5">
+              Data: {SOURCE_VERBOSE[fund.source] ?? fund.source}
+            </p>
           )}
         </div>
-      </div>
 
         <button
           onClick={handleExport}
@@ -450,98 +538,105 @@ export default function FundDetailPage() {
       {/* Stat cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          title="Total Holdings"
-          value={fund.holding_count?.toLocaleString()}
-          icon={Briefcase}
-          description="Reported positions"
-        />
-        <StatCard
-          title="Total AUM"
-          value={formatAUM(fund.total_value)}
+          title="Total Exposure"
+          value={formatAUM(fund.total_exposure_usd)}
           icon={DollarSign}
           description="Sum of reported values"
         />
         <StatCard
-          title="Unique Companies"
-          value={fund.unique_companies?.toLocaleString()}
-          icon={Building2}
-          description="After entity resolution"
+          title="Holdings"
+          value={fund.holding_count?.toLocaleString()}
+          icon={Briefcase}
+          description="Latest quarter"
         />
         <StatCard
-          title="As of Date"
-          value={fund.as_of_date ?? '—'}
+          title="Sectors"
+          value={sectorCount.toLocaleString()}
+          icon={BarChart2}
+          description="Distinct classifications"
+        />
+        <StatCard
+          title="Quarters of Data"
+          value={fund.quarter_count?.toLocaleString() ?? '—'}
           icon={CalendarDays}
-          description="Most recent report"
+          description={isSingleQuarter ? 'Point-in-time snapshot' : 'Historical periods available'}
         />
       </div>
 
-      {/* Two-column: sector chart + top holdings */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Two-column: sector chart + top 15 holdings */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
 
-        {/* Sector breakdown */}
-        <Card>
+        {/* Sector allocation — 55% width */}
+        <Card className="lg:col-span-3">
           <CardHeader>
             <CardTitle>Sector Allocation</CardTitle>
           </CardHeader>
           <CardContent>
-            {fund.sector_breakdown?.length ? (
-              <SectorChart sectors={fund.sector_breakdown} />
-            ) : (
-              <div className="h-64 flex items-center justify-center text-secondary-400 text-sm">
-                No sector data available
-              </div>
-            )}
+            <ValueBarChart
+              data={sectorChartData}
+              height={Math.max(220, sectorChartData.length * 36 + 40)}
+              colorFn={(entry) => sectorChartColor(entry.fullName ?? entry.name)}
+            />
           </CardContent>
         </Card>
 
-        {/* Top 10 holdings by value */}
-        <Card>
+        {/* Top 15 holdings — 45% width */}
+        <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle>Top 10 Holdings by Value</CardTitle>
+            <CardTitle>Top 15 Holdings</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-0">
             {!fund.top_holdings?.length ? (
-              <div className="py-8 text-center text-secondary-400 text-sm">
+              <div className="py-8 text-center text-secondary-400 text-sm px-4">
                 Value data not available for this fund
               </div>
             ) : (
               <div className="overflow-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-secondary-200">
-                      <th className="text-left py-2 px-1 font-medium text-secondary-500 text-xs uppercase tracking-wide">
+                    <tr className="border-b border-secondary-200 bg-secondary-50">
+                      <th className="text-left py-2 px-3 font-medium text-secondary-500 text-xs uppercase tracking-wide">
                         Company
                       </th>
-                      <th className="text-right py-2 px-1 font-medium text-secondary-500 text-xs uppercase tracking-wide">
+                      <th className="text-right py-2 px-3 font-medium text-secondary-500 text-xs uppercase tracking-wide">
                         Value
                       </th>
-                      <th className="text-right py-2 px-1 font-medium text-secondary-500 text-xs uppercase tracking-wide">
-                        % NAV
+                      <th className="text-right py-2 px-3 font-medium text-secondary-500 text-xs uppercase tracking-wide">
+                        %
                       </th>
                     </tr>
                   </thead>
                   <tbody>
                     {fund.top_holdings.map((h, i) => (
                       <tr key={i} className="border-b border-secondary-100 hover:bg-secondary-50">
-                        <td className="py-2 px-1 max-w-[160px] truncate" title={h.company_name}>
-                          {h.company_id ? (
-                            <Link
-                              to={`/companies/${h.company_id}`}
-                              className="text-primary-700 hover:text-primary-900 hover:underline"
+                        <td className="py-2 px-3">
+                          <div className="flex flex-col gap-0.5">
+                            {h.company_id ? (
+                              <Link
+                                to={`/companies/${h.company_id}`}
+                                className="text-xs font-medium text-primary-700 hover:underline truncate max-w-[140px] block"
+                                title={h.company_name}
+                              >
+                                {h.company_name ?? '—'}
+                              </Link>
+                            ) : (
+                              <span className="text-xs font-medium text-secondary-800 truncate max-w-[140px] block" title={h.company_name}>
+                                {h.company_name ?? '—'}
+                              </span>
+                            )}
+                            <span
+                              className={`inline-flex items-center self-start rounded-full px-1.5 py-0 text-xs font-medium ${sectorChipClasses(h.sector)}`}
+                              style={{ fontSize: '10px' }}
                             >
-                              {h.company_name ?? '—'}
-                            </Link>
-                          ) : (
-                            <span className="text-secondary-800">{h.company_name ?? '—'}</span>
-                          )}
+                              {h.sector}
+                            </span>
+                          </div>
                         </td>
-                        <td className="py-2 px-1 text-right tabular-nums font-medium text-secondary-800">
-                          {h.reported_value_usd != null
-                            ? formatCurrency(h.reported_value_usd)
-                            : '—'}
+                        <td className="py-2 px-3 text-right tabular-nums font-medium text-secondary-800 text-xs">
+                          {h.reported_value_usd != null ? formatCurrency(h.reported_value_usd) : '—'}
                         </td>
-                        <td className="py-2 px-1 text-right tabular-nums text-secondary-500">
-                          {h.pct_nav != null ? `${h.pct_nav.toFixed(2)}%` : '—'}
+                        <td className="py-2 px-3 text-right tabular-nums text-secondary-500 text-xs">
+                          {h.pct_of_fund != null ? `${h.pct_of_fund.toFixed(1)}%` : '—'}
                         </td>
                       </tr>
                     ))}
@@ -553,34 +648,60 @@ export default function FundDetailPage() {
         </Card>
       </div>
 
-      {/* Exposure Trend */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>Exposure Trend</CardTitle>
-            <div className="flex items-center gap-1">
-              {['sector', 'geography'].map((dim) => (
-                <button
-                  key={dim}
-                  onClick={() => setTrendDim(dim)}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    trendDim === dim
-                      ? 'bg-primary-600 text-white'
-                      : 'bg-secondary-100 text-secondary-600 hover:bg-secondary-200'
-                  }`}
-                >
-                  {dim.charAt(0).toUpperCase() + dim.slice(1)}
-                </button>
-              ))}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <ExposureTrendChart data={trendData} loading={trendLoading} />
-        </CardContent>
-      </Card>
+      {/* Industry breakdown */}
+      {fund.industry_breakdown?.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Industries by Exposure</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ValueBarChart
+              data={industryChartData}
+              height={Math.max(220, industryChartData.length * 32 + 40)}
+              colorFn={(entry) => sectorChartColor(entry.sector)}
+            />
+          </CardContent>
+        </Card>
+      )}
 
-      {/* Full holdings section */}
+      {/* Exposure trend or BDC banner */}
+      {isSingleQuarter ? (
+        <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3.5 text-sm text-blue-800">
+          <Info className="h-4 w-4 shrink-0 mt-0.5" />
+          <span>
+            <strong>Point-in-time data</strong> — this fund represents a single{' '}
+            {fund.source === 'bdc_filing' ? 'BDC 10-K filing' : 'filing'} snapshot. Exposure trend
+            charts require multiple reporting periods.
+          </span>
+        </div>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Sector Exposure Trend</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ExposureTrendChart data={trendData} loading={trendLoading} />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Geography exposure */}
+      {hasGeography && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Geography Exposure</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ValueBarChart
+              data={geoChartData}
+              height={Math.max(160, geoChartData.length * 32 + 40)}
+              colorFn={null}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Full holdings table */}
       <div>
         <h2 className="text-lg font-semibold text-secondary-900 mb-3">All Holdings</h2>
 
@@ -599,19 +720,9 @@ export default function FundDetailPage() {
                 />
               </div>
 
-              <label className="flex items-center gap-2 text-sm text-secondary-700 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={filters.hasValue}
-                  onChange={(e) => setFilter('hasValue', e.target.checked)}
-                  className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500"
-                />
-                With Value Only
-              </label>
-
-              {hasActiveFilters && (
+              {filters.search && (
                 <button
-                  onClick={clearFilters}
+                  onClick={clearSearch}
                   className="flex items-center gap-1.5 px-3 py-2 text-sm text-secondary-600 border border-secondary-200 rounded-md hover:bg-secondary-50 transition-colors"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -639,16 +750,19 @@ export default function FundDetailPage() {
                     Sector
                   </th>
                   <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
+                    Industry
+                  </th>
+                  <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
                     Country
                   </th>
                   <th className="text-right py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                    Reported Value
+                    Value
+                  </th>
+                  <th className="text-right py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
+                    % Fund
                   </th>
                   <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                    Date
-                  </th>
-                  <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                    Source
+                    As of Date
                   </th>
                 </tr>
               </thead>
@@ -656,29 +770,16 @@ export default function FundDetailPage() {
                 {holdingsLoading ? (
                   [...Array(10)].map((_, i) => (
                     <tr key={i} className="border-b border-secondary-100">
-                      <td className="py-3 px-4">
-                        <div className="h-3.5 w-40 bg-secondary-200 rounded animate-pulse" />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="h-5 w-24 bg-secondary-100 rounded-full animate-pulse" />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="h-3 w-16 bg-secondary-100 rounded animate-pulse" />
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <div className="h-3 w-20 bg-secondary-100 rounded animate-pulse ml-auto" />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="h-3 w-20 bg-secondary-100 rounded animate-pulse" />
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="h-3 w-16 bg-secondary-100 rounded animate-pulse" />
-                      </td>
+                      {[...Array(7)].map((_, j) => (
+                        <td key={j} className="py-3 px-4">
+                          <div className="h-3.5 bg-secondary-200 rounded animate-pulse" style={{ width: `${60 + j * 10}%` }} />
+                        </td>
+                      ))}
                     </tr>
                   ))
                 ) : !holdingsData?.items?.length ? (
                   <tr>
-                    <td colSpan={6} className="py-16 text-center">
+                    <td colSpan={7} className="py-16 text-center">
                       <p className="text-secondary-400 text-sm">No holdings match your filters.</p>
                     </td>
                   </tr>
@@ -698,37 +799,45 @@ export default function FundDetailPage() {
                             {row.company_name ?? '—'}
                           </Link>
                         ) : (
-                          <span className="font-semibold text-primary-700 truncate block" title={row.company_name ?? '—'}>
+                          <span
+                            className="font-semibold text-secondary-800 truncate block"
+                            title={row.company_name ?? '—'}
+                          >
                             {row.company_name ?? '—'}
                           </span>
                         )}
                       </td>
                       <td className="py-3 px-4">
-                        {row.sector ? (
-                          <span
-                            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${sectorClasses(row.sector)}`}
-                          >
-                            {row.sector}
-                          </span>
-                        ) : (
-                          <span className="text-secondary-300 text-xs">—</span>
+                        <span
+                          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${sectorChipClasses(row.sector)}`}
+                        >
+                          {row.sector}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-secondary-600 max-w-[160px] truncate" title={row.industry}>
+                        {row.industry !== 'Unclassified' ? row.industry : (
+                          <span className="text-secondary-300">—</span>
                         )}
                       </td>
                       <td className="py-3 px-4 text-secondary-600">
-                        {row.country ?? <span className="text-secondary-300">—</span>}
+                        {row.country !== 'Unknown' ? row.country : (
+                          <span className="text-secondary-300">—</span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right tabular-nums font-medium text-secondary-800">
-                        {row.reported_value != null ? (
-                          formatCurrency(row.reported_value)
+                        {row.reported_value_usd != null ? (
+                          formatCurrency(row.reported_value_usd)
                         ) : (
                           <span className="text-secondary-300">—</span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-secondary-500 text-xs">
-                        {row.date_reported ?? '—'}
+                      <td className="py-3 px-4 text-right tabular-nums text-secondary-500">
+                        {row.pct_of_fund != null ? `${row.pct_of_fund.toFixed(2)}%` : (
+                          <span className="text-secondary-300">—</span>
+                        )}
                       </td>
-                      <td className="py-3 px-4">
-                        <span className="text-xs text-secondary-400">{row.source ?? '—'}</span>
+                      <td className="py-3 px-4 text-secondary-500 text-xs">
+                        {row.as_of_date ?? '—'}
                       </td>
                     </tr>
                   ))

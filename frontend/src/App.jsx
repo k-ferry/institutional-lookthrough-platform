@@ -13,6 +13,8 @@ import GICSPage from './pages/GICSPage'
 import ReviewQueuePage from './pages/ops/ReviewQueuePage'
 import AuditTrailPage from './pages/ops/AuditTrailPage'
 import PipelineMonitorPage from './pages/ops/PipelineMonitorPage'
+import FundsPage from './pages/FundsPage'
+import SettingsPage from './pages/SettingsPage'
 import NotFound from './pages/NotFound'
 
 const queryClient = new QueryClient({
@@ -61,11 +63,11 @@ function AppRoutes() {
         <Route path="/holdings" element={<HoldingsPage />} />
         <Route path="/geography" element={<GeographyPage />} />
         <Route path="/gics" element={<GICSPage />} />
-        <Route path="/funds" element={<DashboardPage />} />
+        <Route path="/funds" element={<FundsPage />} />
         <Route path="/funds/:fund_id" element={<FundDetailPage />} />
         <Route path="/companies/:company_id" element={<CompanyDetailPage />} />
         <Route path="/agent" element={<AgentPage />} />
-        <Route path="/settings" element={<DashboardPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="/ops/review-queue" element={<ReviewQueuePage />} />
         <Route path="/ops/audit-trail" element={<AuditTrailPage />} />
         <Route path="/ops/pipeline" element={<PipelineMonitorPage />} />
