@@ -1,11 +1,9 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import {
   AreaChart,
   Area,
-  BarChart,
-  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -18,7 +16,8 @@ import {
   DollarSign,
   Briefcase,
   Building2,
-  PieChart,
+  BarChart2,
+  CheckCircle,
   AlertCircle,
 } from 'lucide-react'
 
@@ -46,23 +45,101 @@ async function fetchJSON(url) {
 }
 
 // ---------------------------------------------------------------------------
-// Skeleton
+// Source metadata
 // ---------------------------------------------------------------------------
 
-function StatSkeleton() {
+const SOURCE_META = {
+  synthetic:    {
+    label: 'Synthetic',
+    groupLabel: 'Synthetic Data',
+    badgeClasses: 'bg-gray-100 text-gray-700 border-gray-200',
+    accentBg: 'bg-gray-50',
+    accentBorder: 'border-l-gray-400',
+    headerBg: 'bg-gray-50',
+  },
+  bdc_filing:   {
+    label: 'BDC Filing',
+    groupLabel: 'BDC Filings',
+    badgeClasses: 'bg-blue-100 text-blue-800 border-blue-200',
+    accentBg: 'bg-blue-50',
+    accentBorder: 'border-l-blue-500',
+    headerBg: 'bg-blue-50',
+  },
+  '13f_filing': {
+    label: '13F Filing',
+    groupLabel: 'Public Market Filings',
+    badgeClasses: 'bg-green-100 text-green-800 border-green-200',
+    accentBg: 'bg-green-50',
+    accentBorder: 'border-l-green-500',
+    headerBg: 'bg-green-50',
+  },
+  pdf_document: {
+    label: 'PDF Document',
+    groupLabel: 'Private Market Funds',
+    badgeClasses: 'bg-purple-100 text-purple-800 border-purple-200',
+    accentBg: 'bg-purple-50',
+    accentBorder: 'border-l-purple-500',
+    headerBg: 'bg-purple-50',
+  },
+}
+
+// Fund type badge colors
+const FUND_TYPE_CLASSES = {
+  PE:        'bg-blue-900 text-white',
+  VC:        'bg-blue-600 text-white',
+  hedge:     'bg-purple-700 text-white',
+  credit:    'bg-teal-600 text-white',
+  BDC:       'bg-emerald-600 text-white',
+  ETF:       'bg-sky-200 text-sky-900',
+  synthetic: 'bg-gray-400 text-white',
+}
+
+function fundTypeBadgeClasses(type) {
+  if (!type) return 'bg-gray-200 text-gray-600'
+  for (const [key, cls] of Object.entries(FUND_TYPE_CLASSES)) {
+    if (type.toLowerCase() === key.toLowerCase()) return cls
+  }
+  return 'bg-gray-200 text-gray-600'
+}
+
+// Fund table group order
+const SOURCE_GROUP_ORDER = ['pdf_document', '13f_filing', 'bdc_filing', 'synthetic']
+
+// Trend chart palette
+const TREND_COLORS = [
+  '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
+]
+
+// ---------------------------------------------------------------------------
+// Skeletons
+// ---------------------------------------------------------------------------
+
+function StatCardSkeleton() {
   return (
     <Card>
       <CardContent className="p-6">
         <div className="flex items-center justify-between">
           <div className="space-y-2 flex-1">
-            <div className="h-3 w-24 bg-secondary-200 rounded animate-pulse" />
-            <div className="h-7 w-32 bg-secondary-200 rounded animate-pulse" />
-            <div className="h-2 w-28 bg-secondary-100 rounded animate-pulse" />
+            <div className="h-3 w-20 bg-secondary-200 rounded animate-pulse" />
+            <div className="h-7 w-28 bg-secondary-200 rounded animate-pulse" />
+            <div className="h-2.5 w-24 bg-secondary-100 rounded animate-pulse" />
           </div>
           <div className="h-12 w-12 rounded-full bg-secondary-100 animate-pulse" />
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+function SourceCardSkeleton() {
+  return (
+    <div className="rounded-lg border border-secondary-200 bg-white p-4 border-l-4 border-l-secondary-200 animate-pulse">
+      <div className="h-4 w-24 bg-secondary-200 rounded mb-3" />
+      <div className="flex justify-between items-end">
+        <div className="h-8 w-16 bg-secondary-200 rounded" />
+        <div className="h-5 w-10 bg-secondary-100 rounded" />
+      </div>
+    </div>
   )
 }
 
@@ -75,17 +152,53 @@ function StatCard({ title, value, icon: Icon, description }) {
     <Card>
       <CardContent className="p-6">
         <div className="flex items-center justify-between">
-          <div>
+          <div className="min-w-0">
             <p className="text-sm font-medium text-secondary-500">{title}</p>
-            <p className="text-2xl font-bold text-secondary-900 mt-1">{value}</p>
-            <p className="text-xs text-secondary-400 mt-1">{description}</p>
+            <p className="text-2xl font-bold text-secondary-900 mt-1 truncate">{value ?? '—'}</p>
+            {description && <p className="text-xs text-secondary-400 mt-1">{description}</p>}
           </div>
-          <div className="h-12 w-12 rounded-full bg-primary-50 flex items-center justify-center">
+          <div className="h-12 w-12 rounded-full bg-primary-50 flex items-center justify-center shrink-0 ml-3">
             <Icon className="h-6 w-6 text-primary-600" />
           </div>
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Source Breakdown Card
+// ---------------------------------------------------------------------------
+
+function SourceCard({ source, holdingCount, fundCount, latestDate }) {
+  const meta = SOURCE_META[source] ?? {
+    label: source,
+    badgeClasses: 'bg-gray-100 text-gray-700 border-gray-200',
+    accentBorder: 'border-l-gray-300',
+  }
+  return (
+    <div className={`rounded-lg border border-secondary-200 bg-white p-4 border-l-4 ${meta.accentBorder}`}>
+      <div className="flex items-start justify-between mb-3">
+        <span
+          className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${meta.badgeClasses}`}
+        >
+          {meta.label}
+        </span>
+        <span className="text-xs text-secondary-400 ml-2 shrink-0">{latestDate ?? '—'}</span>
+      </div>
+      <div className="flex items-end justify-between">
+        <div>
+          <p className="text-2xl font-bold text-secondary-900 tabular-nums">
+            {holdingCount?.toLocaleString() ?? '—'}
+          </p>
+          <p className="text-xs text-secondary-500 mt-0.5">holdings</p>
+        </div>
+        <div className="text-right">
+          <p className="text-lg font-semibold text-secondary-700 tabular-nums">{fundCount ?? '—'}</p>
+          <p className="text-xs text-secondary-500">fund{fundCount !== 1 ? 's' : ''}</p>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -103,86 +216,16 @@ function ErrorBanner({ message }) {
 }
 
 // ---------------------------------------------------------------------------
-// Sector Chart
-// ---------------------------------------------------------------------------
-
-const CHART_COLOR = '#1A4B9B' // primary-500
-
-function SectorChart({ sectors }) {
-  const navigate = useNavigate()
-  const data = sectors.map((s) => ({
-    name: s.sector.length > 20 ? s.sector.slice(0, 18) + '…' : s.sector,
-    fullName: s.sector,
-    value: s.holding_count,
-    total_value: s.total_value,
-    pct: s.percentage,
-  }))
-
-  function handleBarClick(payload) {
-    if (payload?.activePayload?.[0]?.payload?.fullName) {
-      navigate(`/gics?sector=${encodeURIComponent(payload.activePayload[0].payload.fullName)}`)
-    }
-  }
-
-  return (
-    <ResponsiveContainer width="100%" height={280}>
-      <BarChart
-        data={data}
-        layout="vertical"
-        margin={{ left: 8, right: 32, top: 4, bottom: 4 }}
-        onClick={handleBarClick}
-        style={{ cursor: 'pointer' }}
-      >
-        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
-        <XAxis
-          type="number"
-          tickFormatter={(v) => formatNumber(v)}
-          tick={{ fontSize: 11, fill: '#64748b' }}
-          axisLine={false}
-          tickLine={false}
-          label={{ value: 'Holdings', position: 'insideBottomRight', offset: -4, fontSize: 10, fill: '#94a3b8' }}
-        />
-        <YAxis
-          type="category"
-          dataKey="name"
-          width={130}
-          tick={{ fontSize: 11, fill: '#475569' }}
-          axisLine={false}
-          tickLine={false}
-        />
-        <Tooltip
-          formatter={(value, _name, props) => {
-            const { total_value, pct, fullName } = props.payload
-            const valueStr = total_value != null ? ` · ${formatAUM(total_value)}` : ''
-            return [`${formatNumber(value)} holdings${valueStr} (${pct}%) — click to drill in`, fullName]
-          }}
-          contentStyle={{
-            fontSize: 12,
-            borderRadius: 6,
-            border: '1px solid #e2e8f0',
-          }}
-        />
-        <Bar dataKey="value" fill={CHART_COLOR} radius={[0, 4, 4, 0]} maxBarSize={24} />
-      </BarChart>
-    </ResponsiveContainer>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Exposure Trend Chart
 // ---------------------------------------------------------------------------
-
-const TREND_COLORS = [
-  '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
-]
 
 function ExposureTrendChart({ data, loading }) {
   if (loading) {
     return (
-      <div className="h-64 flex items-center justify-center">
+      <div className="h-72 flex items-center justify-center">
         <div className="space-y-3 w-full px-4">
           {[...Array(3)].map((_, i) => (
-            <div key={i} className="h-8 bg-secondary-200 rounded animate-pulse" />
+            <div key={i} className="h-10 bg-secondary-200 rounded animate-pulse" />
           ))}
         </div>
       </div>
@@ -191,7 +234,7 @@ function ExposureTrendChart({ data, loading }) {
 
   if (!data?.dates?.length || !data?.series?.length) {
     return (
-      <div className="h-64 flex items-center justify-center text-secondary-400 text-sm">
+      <div className="h-72 flex items-center justify-center text-secondary-400 text-sm">
         No trend data available. Run the pipeline to generate snapshots.
       </div>
     )
@@ -204,10 +247,15 @@ function ExposureTrendChart({ data, loading }) {
   })
 
   return (
-    <ResponsiveContainer width="100%" height={280}>
-      <AreaChart data={chartData} margin={{ left: 8, right: 16, top: 4, bottom: 4 }}>
+    <ResponsiveContainer width="100%" height={300}>
+      <AreaChart data={chartData} margin={{ left: 8, right: 24, top: 4, bottom: 4 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-        <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+        <XAxis
+          dataKey="date"
+          tick={{ fontSize: 10, fill: '#64748b' }}
+          axisLine={false}
+          tickLine={false}
+        />
         <YAxis
           tickFormatter={(v) => `${v.toFixed(0)}%`}
           tick={{ fontSize: 10, fill: '#64748b' }}
@@ -237,46 +285,140 @@ function ExposureTrendChart({ data, loading }) {
 }
 
 // ---------------------------------------------------------------------------
-// Fund Table
+// Fund Lineup Table
 // ---------------------------------------------------------------------------
 
-function FundTable({ funds }) {
+function FundLineupTable({ funds, loading }) {
+  if (loading) {
+    return (
+      <div className="space-y-1 p-2">
+        {[...Array(8)].map((_, i) => (
+          <div key={i} className="flex items-center gap-4 p-3">
+            <div className="h-3.5 w-48 bg-secondary-200 rounded animate-pulse" />
+            <div className="h-5 w-16 bg-secondary-100 rounded-full animate-pulse" />
+            <div className="h-3 w-12 bg-secondary-100 rounded animate-pulse ml-auto" />
+            <div className="h-3 w-20 bg-secondary-100 rounded animate-pulse" />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  if (!funds?.length) {
+    return (
+      <div className="py-12 text-center text-secondary-400 text-sm">
+        No fund data available
+      </div>
+    )
+  }
+
+  // Group by source, preserving order
+  const grouped = {}
+  SOURCE_GROUP_ORDER.forEach((s) => { grouped[s] = [] })
+  funds.forEach((f) => {
+    const key = SOURCE_GROUP_ORDER.includes(f.source) ? f.source : 'synthetic'
+    grouped[key].push(f)
+  })
+
   return (
-    <div className="overflow-auto">
+    <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-secondary-200">
-            <th className="text-left py-2 px-1 font-medium text-secondary-500">Fund</th>
-            <th className="text-right py-2 px-1 font-medium text-secondary-500">Holdings</th>
-            <th className="text-right py-2 px-1 font-medium text-secondary-500">AUM</th>
-            <th className="text-right py-2 px-1 font-medium text-secondary-500">% Portfolio</th>
+          <tr className="border-b border-secondary-200 bg-secondary-50">
+            <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">Fund</th>
+            <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">Type</th>
+            <th className="text-right py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">Holdings</th>
+            <th className="text-right py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">Exposure</th>
+            <th className="text-right py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">Sectors</th>
+            <th className="text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide">As of Date</th>
           </tr>
         </thead>
         <tbody>
-          {funds.map((f) => (
-            <tr key={f.fund_id} className="border-b border-secondary-100 hover:bg-secondary-50 transition-colors">
-              <td className="py-2 px-1 max-w-[180px] truncate">
-                <Link
-                  to={`/funds/${f.fund_id}`}
-                  className="font-medium text-primary-700 hover:text-primary-900 hover:underline truncate block"
-                  title={f.fund_name}
+          {SOURCE_GROUP_ORDER.flatMap((source) => {
+            const group = grouped[source]
+            if (!group?.length) return []
+            const meta = SOURCE_META[source]
+            const groupLabel = meta?.groupLabel ?? source
+
+            return [
+              // Group header row
+              <tr key={`hdr-${source}`}>
+                <td
+                  colSpan={6}
+                  className={`py-2 px-4 border-y border-secondary-100 ${meta?.headerBg ?? 'bg-secondary-50'}`}
                 >
-                  {f.fund_name}
-                </Link>
-              </td>
-              <td className="py-2 px-1 text-right text-secondary-600 tabular-nums">
-                {formatNumber(f.holding_count ?? 0)}
-              </td>
-              <td className="py-2 px-1 text-right text-secondary-800 font-medium tabular-nums">
-                {f.total_value != null ? formatAUM(f.total_value) : 'N/A'}
-              </td>
-              <td className="py-2 px-1 text-right tabular-nums">
-                <span className="inline-flex items-center rounded-full bg-primary-50 px-2 py-0.5 text-xs font-medium text-primary-700">
-                  {(f.percentage_of_portfolio ?? 0).toFixed(1)}%
-                </span>
-              </td>
-            </tr>
-          ))}
+                  <div className="flex items-center gap-2.5">
+                    <span
+                      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${meta?.badgeClasses ?? ''}`}
+                    >
+                      {meta?.label ?? source}
+                    </span>
+                    <span className="text-xs font-semibold text-secondary-600 uppercase tracking-wide">
+                      {groupLabel}
+                    </span>
+                    <span className="text-xs text-secondary-400">
+                      {group.length} fund{group.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                </td>
+              </tr>,
+              // Fund rows
+              ...group.map((f) => (
+                <tr
+                  key={f.fund_id}
+                  className="border-b border-secondary-100 hover:bg-secondary-50 transition-colors"
+                >
+                  {/* Fund name */}
+                  <td className="py-3 px-4 max-w-[240px]">
+                    <Link
+                      to={`/funds/${f.fund_id}`}
+                      className="font-medium text-primary-700 hover:text-primary-900 hover:underline truncate block"
+                      title={f.fund_name}
+                    >
+                      {f.fund_name}
+                    </Link>
+                  </td>
+
+                  {/* Fund type badge */}
+                  <td className="py-3 px-4">
+                    {f.fund_type ? (
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${fundTypeBadgeClasses(f.fund_type)}`}
+                      >
+                        {f.fund_type}
+                      </span>
+                    ) : (
+                      <span className="text-secondary-300 text-xs">—</span>
+                    )}
+                  </td>
+
+                  {/* Holdings */}
+                  <td className="py-3 px-4 text-right tabular-nums text-secondary-700">
+                    {formatNumber(f.holding_count)}
+                  </td>
+
+                  {/* Exposure */}
+                  <td className="py-3 px-4 text-right tabular-nums font-medium text-secondary-800">
+                    {f.total_exposure_usd != null ? formatAUM(f.total_exposure_usd) : (
+                      <span className="text-secondary-300 font-normal">—</span>
+                    )}
+                  </td>
+
+                  {/* Sectors covered */}
+                  <td className="py-3 px-4 text-right tabular-nums text-secondary-500">
+                    {f.sector_count > 0 ? f.sector_count : (
+                      <span className="text-secondary-300">—</span>
+                    )}
+                  </td>
+
+                  {/* Latest as-of date */}
+                  <td className="py-3 px-4 text-secondary-500 text-xs">
+                    {f.latest_as_of_date ?? '—'}
+                  </td>
+                </tr>
+              )),
+            ]
+          })}
         </tbody>
       </table>
     </div>
@@ -290,70 +432,54 @@ function FundTable({ funds }) {
 export default function DashboardPage() {
   const [trendDim, setTrendDim] = useState('sector')
 
-  const {
-    data: stats,
-    isLoading: statsLoading,
-    error: statsError,
-  } = useQuery({
+  const { data: stats, isLoading: statsLoading, error: statsError } = useQuery({
     queryKey: ['dashboard-stats'],
     queryFn: () => fetchJSON('/api/dashboard/stats'),
-  })
-
-  const {
-    data: sectorData,
-    isLoading: sectorsLoading,
-    error: sectorsError,
-  } = useQuery({
-    queryKey: ['dashboard-sectors'],
-    queryFn: () => fetchJSON('/api/dashboard/sector-breakdown'),
-  })
-
-  const {
-    data: fundData,
-    isLoading: fundsLoading,
-    error: fundsError,
-  } = useQuery({
-    queryKey: ['dashboard-funds'],
-    queryFn: () => fetchJSON('/api/dashboard/fund-breakdown'),
+    staleTime: 5 * 60 * 1000,
   })
 
   const { data: trendData, isLoading: trendLoading } = useQuery({
     queryKey: ['exposure-trend', trendDim],
-    queryFn: () =>
-      fetchJSON(
-        `/api/dashboard/exposure-trend?dimension_type=${trendDim}&periods=8`,
-      ),
+    queryFn: () => fetchJSON(`/api/dashboard/exposure-trend?dimension_type=${trendDim}&periods=8`),
+    staleTime: 5 * 60 * 1000,
   })
+
+  const { data: fundsData, isLoading: fundsLoading, error: fundsError } = useQuery({
+    queryKey: ['dashboard-funds-summary'],
+    queryFn: () => fetchJSON('/api/dashboard/funds-summary'),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  // Source breakdown from stats
+  const sourceBreakdown = stats?.source_breakdown ?? []
+  const sourceMap = Object.fromEntries(sourceBreakdown.map((s) => [s.source, s]))
 
   return (
     <div className="space-y-6">
+
+      {/* Page header */}
       <div>
         <h1 className="text-2xl font-bold text-secondary-900">Portfolio Overview</h1>
-        <p className="text-secondary-500 mt-1">
-          Aggregated view across all institutional holdings
+        <p className="text-secondary-500 mt-1 text-sm">
+          Aggregated look-through exposure across all institutional holdings
         </p>
       </div>
 
-      {statsError && (
-        <ErrorBanner message={`Failed to load stats: ${statsError.message}`} />
-      )}
+      {statsError && <ErrorBanner message={`Failed to load stats: ${statsError.message}`} />}
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Top stat cards (5) */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {statsLoading ? (
           <>
-            <StatSkeleton />
-            <StatSkeleton />
-            <StatSkeleton />
-            <StatSkeleton />
+            {[...Array(5)].map((_, i) => <StatCardSkeleton key={i} />)}
           </>
         ) : stats ? (
           <>
             <StatCard
-              title="Total AUM"
-              value={formatAUM(stats.total_aum)}
+              title="Total Exposure"
+              value={formatAUM(stats.total_exposure_usd)}
               icon={DollarSign}
-              description="Assets under management"
+              description="Sum of reported values"
             />
             <StatCard
               title="Holdings"
@@ -362,89 +488,60 @@ export default function DashboardPage() {
               description="Individual positions"
             />
             <StatCard
+              title="Funds"
+              value={formatNumber(stats.fund_count)}
+              icon={BarChart2}
+              description={`${stats.data_sources} source${stats.data_sources !== 1 ? 's' : ''}`}
+            />
+            <StatCard
               title="Companies"
-              value={formatNumber(stats.total_companies)}
+              value={formatNumber(stats.company_count)}
               icon={Building2}
               description="Unique entities"
             />
             <StatCard
-              title="Funds"
-              value={formatNumber(stats.total_funds)}
-              icon={PieChart}
-              description={`${stats.data_sources} data source${stats.data_sources !== 1 ? 's' : ''}`}
+              title="Classified"
+              value={`${stats.classification_coverage_pct ?? 0}%`}
+              icon={CheckCircle}
+              description={`of ${formatNumber(stats.company_count)} companies`}
             />
           </>
         ) : null}
       </div>
 
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Sector Breakdown */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Sector Allocation</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {sectorsError ? (
-              <ErrorBanner message={`Failed to load sectors: ${sectorsError.message}`} />
-            ) : sectorsLoading ? (
-              <div className="h-64 flex items-center justify-center">
-                <div className="space-y-3 w-full px-4">
-                  {[...Array(5)].map((_, i) => (
-                    <div key={i} className="flex items-center gap-3">
-                      <div className="h-3 w-28 bg-secondary-200 rounded animate-pulse" />
-                      <div
-                        className="h-5 bg-secondary-200 rounded animate-pulse"
-                        style={{ width: `${60 - i * 10}%` }}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : sectorData?.sectors?.length ? (
-              <SectorChart sectors={sectorData.sectors} />
-            ) : (
-              <div className="h-64 flex items-center justify-center text-secondary-400 text-sm">
-                No sector data available
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Fund Breakdown */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Fund Breakdown</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {fundsError ? (
-              <ErrorBanner message={`Failed to load funds: ${fundsError.message}`} />
-            ) : fundsLoading ? (
-              <div className="space-y-3">
-                {[...Array(5)].map((_, i) => (
-                  <div key={i} className="flex justify-between items-center py-1">
-                    <div className="h-3 w-40 bg-secondary-200 rounded animate-pulse" />
-                    <div className="h-3 w-16 bg-secondary-200 rounded animate-pulse" />
-                    <div className="h-3 w-20 bg-secondary-200 rounded animate-pulse" />
-                  </div>
-                ))}
-              </div>
-            ) : fundData?.funds?.length ? (
-              <FundTable funds={fundData.funds} />
-            ) : (
-              <div className="h-64 flex items-center justify-center text-secondary-400 text-sm">
-                No fund data available
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      {/* Source breakdown (4 cards) */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {statsLoading ? (
+          <>
+            {[...Array(4)].map((_, i) => <SourceCardSkeleton key={i} />)}
+          </>
+        ) : (
+          SOURCE_GROUP_ORDER.map((source) => {
+            const s = sourceMap[source]
+            if (!s) return null
+            return (
+              <SourceCard
+                key={source}
+                source={source}
+                holdingCount={s.holding_count}
+                fundCount={s.fund_count}
+                latestDate={s.latest_as_of_date}
+              />
+            )
+          })
+        )}
       </div>
 
       {/* Portfolio Exposure Over Time */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle>Portfolio Exposure Over Time</CardTitle>
+            <div>
+              <CardTitle>Portfolio Exposure Over Time</CardTitle>
+              <p className="text-xs text-secondary-400 mt-0.5">
+                % allocation by {trendDim} — all sources combined
+              </p>
+            </div>
             <div className="flex items-center gap-1">
               {['sector', 'geography'].map((dim) => (
                 <button
@@ -464,6 +561,35 @@ export default function DashboardPage() {
         </CardHeader>
         <CardContent>
           <ExposureTrendChart data={trendData} loading={trendLoading} />
+        </CardContent>
+      </Card>
+
+      {/* Fund Lineup */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Fund Lineup</CardTitle>
+              <p className="text-xs text-secondary-400 mt-0.5">
+                {fundsData?.length ?? 0} funds — latest quarter data — sorted by exposure
+              </p>
+            </div>
+            <Link
+              to="/holdings"
+              className="text-xs text-primary-600 hover:text-primary-800 hover:underline"
+            >
+              View all holdings →
+            </Link>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {fundsError ? (
+            <div className="p-4">
+              <ErrorBanner message={`Failed to load funds: ${fundsError.message}`} />
+            </div>
+          ) : (
+            <FundLineupTable funds={fundsData} loading={fundsLoading} />
+          )}
         </CardContent>
       </Card>
     </div>

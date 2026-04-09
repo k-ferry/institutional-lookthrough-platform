@@ -391,7 +391,7 @@ def main() -> None:
 
         if args.taxonomy_type == "industry":
             # -----------------------------------------------------------------
-            # Two-step: sector → filtered industry
+            # Two-step: sector -> filtered industry
             # -----------------------------------------------------------------
             sector_done = (company_id, "sector") in already_classified
             industry_done = (company_id, "industry") in already_classified
@@ -433,19 +433,19 @@ def main() -> None:
 
                 if sector_result.node_name is None or sector_result.confidence < cfg.confidence_threshold:
                     print(
-                        f"  → Sector unclassifiable (confidence={sector_result.confidence:.2f}), "
+                        f"  -> Sector unclassifiable (confidence={sector_result.confidence:.2f}), "
                         f"skipping industry"
                     )
                     sector_name = None
                 else:
                     sector_name = sector_result.node_name
-                    print(f"  → Sector: {sector_name} ({sector_result.confidence:.2f})")
+                    print(f"  -> Sector: {sector_name} ({sector_result.confidence:.2f})")
 
             # Step 2 — Industry (using only nodes from the matched sector)
             if sector_name is not None and not industry_done:
                 filtered_nodes = sector_to_industry_map.get(sector_name, [])
                 if not filtered_nodes:
-                    print(f"  → No GICS industry nodes mapped for sector '{sector_name}', skipping industry")
+                    print(f"  -> No GICS industry nodes mapped for sector '{sector_name}', skipping industry")
                 else:
                     n = len(filtered_nodes)
                     est = _estimate_tokens(n, company_name, company_desc)
@@ -469,11 +469,11 @@ def main() -> None:
                         else "00000000-0000-0000-0000-000000000000"
                     )
                     if industry_result.node_name is None:
-                        print(f"  → Industry unclassifiable")
+                        print(f"  -> Industry unclassifiable")
                     elif industry_result.confidence < cfg.confidence_threshold:
-                        print(f"  → Industry low confidence ({industry_result.confidence:.2f}): {industry_result.node_name}")
+                        print(f"  -> Industry low confidence ({industry_result.confidence:.2f}): {industry_result.node_name}")
                     else:
-                        print(f"  → Industry: {industry_result.node_name} ({industry_result.confidence:.2f})")
+                        print(f"  -> Industry: {industry_result.node_name} ({industry_result.confidence:.2f})")
                     out_rows.append(
                         _make_row(run_id, company_id, company_name, industry_result, ind_node_id, cfg.model, cfg.prompt_version)
                     )
@@ -504,11 +504,11 @@ def main() -> None:
             )
 
             if result.node_name is None:
-                print(f"  → Unclassifiable")
+                print(f"  -> Unclassifiable")
             elif result.confidence < cfg.confidence_threshold:
-                print(f"  → Low confidence ({result.confidence:.2f}): {result.node_name}")
+                print(f"  -> Low confidence ({result.confidence:.2f}): {result.node_name}")
             else:
-                print(f"  → {result.node_name} ({result.confidence:.2f})")
+                print(f"  -> {result.node_name} ({result.confidence:.2f})")
 
             node_id = (
                 _lookup_node_id(taxonomy, args.taxonomy_type, result.node_name)
