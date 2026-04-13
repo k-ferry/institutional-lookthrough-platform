@@ -24,11 +24,12 @@ from src.lookthrough.db.repository import ensure_tables
 
 
 STEPS = [
-    {
-        'name': 'Synthetic Data Generation',
-        'cmd': [sys.executable, '-m', 'src.lookthrough.synthetic.generate'],
-        'always': True,
-    },
+    # Synthetic data generation disabled — real fund data only
+    # {
+    #     'name': 'Synthetic Data Generation',
+    #     'cmd': [sys.executable, '-m', 'src.lookthrough.synthetic.generate'],
+    #     'always': True,
+    # },
     {
         'name': 'Load Data Sources',
         'cmd': [sys.executable, '-m', 'src.lookthrough.ingestion.load_sources'],
@@ -79,6 +80,11 @@ STEPS = [
     {
         'name': 'Aggregation',
         'cmd': [sys.executable, '-m', 'src.lookthrough.inference.aggregate'],
+        'always': True,
+    },
+    {
+        'name': 'LP Exposure Scaling',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.inference.scale_exposure'],
         'always': True,
     },
     {

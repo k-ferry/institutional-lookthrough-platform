@@ -149,6 +149,7 @@ class FactFundReport(Base):
     contributions_usd: Mapped[float] = mapped_column(Float, nullable=True)
     distributions_usd: Mapped[float] = mapped_column(Float, nullable=True)
     unfunded_commitment_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    total_net_assets_usd: Mapped[float] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=True)
 
 
@@ -314,6 +315,39 @@ class EntityResolutionLog(Base):
     duplicate_company_name: Mapped[str] = mapped_column(String(500), nullable=True)
     method: Mapped[str] = mapped_column(String(50), nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=True)
+
+
+class FactLpPosition(Base):
+    """Northbridge Endowment Fund's ownership position in each fund per quarter."""
+
+    __tablename__ = "fact_lp_position"
+
+    position_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    lp_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    fund_id: Mapped[str] = mapped_column(String(36))
+    as_of_date: Mapped[str] = mapped_column(String(20))
+    nav_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    total_fund_nav_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    ownership_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=True)
+
+
+class FactLpScaledExposure(Base):
+    """Each holding's fair value scaled to Northbridge's LP ownership percentage."""
+
+    __tablename__ = "fact_lp_scaled_exposure"
+
+    scaled_exposure_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fund_id: Mapped[str] = mapped_column(String(36))
+    company_id: Mapped[str] = mapped_column(String(36), nullable=True)
+    fund_report_id: Mapped[str] = mapped_column(String(36), nullable=True)
+    reported_holding_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    as_of_date: Mapped[str] = mapped_column(String(20), nullable=True)
+    raw_value_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    ownership_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    scaled_value_usd: Mapped[float] = mapped_column(Float, nullable=True)
+    lp_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=True)
 
 
 class GICSMapping(Base):

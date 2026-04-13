@@ -108,7 +108,37 @@ FUND_CONFIG = [
         "folder": "crestview",
         "fund_name": "Crestview Technology Partners",
         "fund_type": "hedge_fund",
-        "doc_types": ["transparency_report"],
+        "doc_types": ["transparency_report", "lp_statement"],
+    },
+    {
+        "folder": "arcc",
+        "fund_name": "ARCC Capital",
+        "fund_type": "BDC",
+        "doc_types": ["lp_statement"],
+    },
+    {
+        "folder": "main",
+        "fund_name": "MAIN Capital",
+        "fund_type": "BDC",
+        "doc_types": ["lp_statement"],
+    },
+    {
+        "folder": "obdc",
+        "fund_name": "OBDC Capital",
+        "fund_type": "BDC",
+        "doc_types": ["lp_statement"],
+    },
+    {
+        "folder": "brightline_etf",
+        "fund_name": "Brightline Innovation ETF",
+        "fund_type": "etf",
+        "doc_types": ["lp_statement"],
+    },
+    {
+        "folder": "vertex_macro",
+        "fund_name": "Vertex Macro Fund",
+        "fund_type": "hedge_fund",
+        "doc_types": ["lp_statement"],
     },
 ]
 
@@ -129,6 +159,7 @@ PROMPTS: dict[str, str] = {
         "{\n"
         '  "fund_name": "...",\n'
         '  "reporting_date": "YYYY-MM-DD",\n'
+        '  "total_net_assets_usd": 604000000,\n'
         '  "holdings": [\n'
         "    {\n"
         '      "company_name": "...",\n'
@@ -139,6 +170,9 @@ PROMPTS: dict[str, str] = {
         "    }\n"
         "  ]\n"
         "}\n\n"
+        "Extract total_net_assets_usd from the balance sheet "
+        "(labeled as Net Assets, Total Net Assets, or Partners Capital). "
+        "Return as full integer in USD.\n\n"
         + _MONETARY_NOTE
         + "Document text:\n"
     ),
@@ -215,6 +249,7 @@ def _run_migrations() -> None:
         "ALTER TABLE fact_fund_report ADD COLUMN IF NOT EXISTS contributions_usd FLOAT",
         "ALTER TABLE fact_fund_report ADD COLUMN IF NOT EXISTS distributions_usd FLOAT",
         "ALTER TABLE fact_fund_report ADD COLUMN IF NOT EXISTS unfunded_commitment_usd FLOAT",
+        "ALTER TABLE fact_fund_report ADD COLUMN IF NOT EXISTS total_net_assets_usd FLOAT",
         "ALTER TABLE fact_reported_holding ADD COLUMN IF NOT EXISTS cost_basis_usd FLOAT",
         "ALTER TABLE fact_reported_holding ADD COLUMN IF NOT EXISTS ownership_pct FLOAT",
     ]
@@ -225,6 +260,110 @@ def _run_migrations() -> None:
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+# Tokens stripped from fund names before fuzzy matching.
+# These are legal/structural suffixes that carry no discriminating signal.
+_STRIP_SUFFIXES: frozenset[str] = frozenset({
+    "capital", "fund", "partners", "llc", "inc", "corp", "ltd", "co", "lp", "plc",
+    "etf", "management", "investments", "advisors", "group", "asset", "assets",
+    # Roman numerals and series letters
+    "i", "ii", "iii", "iv", "v", "vi", "vii", "viii",
+    "a", "b", "c", "d", "e",
+})
+
+MATCH_THRESHOLD = 0.6  # Minimum score to accept a fuzzy folder→fund match
+
+
+def _normalize(s: str) -> str:
+    """Lowercase, replace separators with spaces, strip non-alphanumeric."""
+    s = s.lower()
+    s = re.sub(r"[_\-]+", " ", s)
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return s.strip()
+
+
+def _meaningful_tokens(s: str) -> set[str]:
+    """Return tokens from s that are not generic suffixes and are ≥2 chars long."""
+    return {
+        t for t in _normalize(s).split()
+        if t not in _STRIP_SUFFIXES and len(t) >= 2
+    }
+
+
+def _match_score(folder_name: str, fund_name: str) -> float:
+    """
+    Return a similarity score in [0, 1] between a folder name and a fund name.
+
+    Strategy (in order of confidence):
+    1. Exact token-set match after stripping suffixes → 1.0
+    2. Jaccard similarity on meaningful tokens
+    3. Subset bonus: if all folder tokens appear in the fund name, score ≥ 0.7
+    """
+    f_tokens = _meaningful_tokens(folder_name)
+    n_tokens = _meaningful_tokens(fund_name)
+
+    if not f_tokens or not n_tokens:
+        return 0.0
+
+    if f_tokens == n_tokens:
+        return 1.0
+
+    intersection = f_tokens & n_tokens
+    if not intersection:
+        return 0.0
+
+    jaccard = len(intersection) / len(f_tokens | n_tokens)
+
+    # Subset bonus: folder tokens are fully contained in the fund name
+    if f_tokens.issubset(n_tokens):
+        coverage = len(intersection) / len(n_tokens)
+        return max(jaccard, 0.5 + coverage * 0.5)
+
+    return jaccard
+
+
+def _match_folder_to_fund(
+    folder_name: str,
+    dim_fund_rows: list[dict],
+) -> tuple[dict, float] | None:
+    """
+    Find the best-matching fund row for an unknown OneDrive folder name.
+
+    Returns (fund_row_dict, confidence) when a match above MATCH_THRESHOLD is
+    found, or None if no fund is close enough.
+    """
+    if not dim_fund_rows:
+        return None
+
+    best_fund: dict | None = None
+    best_score = 0.0
+
+    for fund in dim_fund_rows:
+        fund_name = fund.get("fund_name") or ""
+        if not fund_name:
+            continue
+        score = _match_score(folder_name, fund_name)
+        if score > best_score:
+            best_score = score
+            best_fund = fund
+
+    if best_score >= MATCH_THRESHOLD and best_fund is not None:
+        return best_fund, best_score
+    return None
+
+
+def _infer_doc_types(fund_type: str) -> list[str]:
+    """Infer likely document types from a fund's fund_type string."""
+    ft = (fund_type or "").lower()
+    if ft in ("bdc", "etf", "public"):
+        return ["lp_statement"]
+    if ft == "hedge_fund":
+        return ["transparency_report", "lp_statement"]
+    if ft in ("private_equity", "venture_capital", "private_credit"):
+        return ["financial_statements", "lp_statement"]
+    # unknown / other — try everything
+    return ["financial_statements", "lp_statement", "transparency_report"]
+
 
 def _make_uuid(seed: str) -> str:
     """Generate a deterministic UUID from a seed string."""
@@ -363,7 +502,7 @@ def write_to_db(
     Returns (reports_written, holdings_written).
     """
     fund_name = fund_config.get("fund_name", fund_config["folder"])
-    fund_id = _make_uuid(f"pdf_fund_{fund_name}")
+    fund_id = fund_config.get("fund_id") or _make_uuid(f"pdf_fund_{fund_name}")
     reporting_date = _parse_date(extracted_data.get("reporting_date"))
     fund_report_id = _make_uuid(f"pdf_report_{fund_name}_{reporting_date}")
 
@@ -405,6 +544,7 @@ def write_to_db(
         "contributions_usd": extracted_data.get("contributions_usd") if is_lp else None,
         "distributions_usd": extracted_data.get("distributions_usd") if is_lp else None,
         "unfunded_commitment_usd": extracted_data.get("unfunded_commitment_usd") if is_lp else None,
+        "total_net_assets_usd": extracted_data.get("total_net_assets_usd") if doc_type == "financial_statements" else None,
         "source": SOURCE,
     }
 
@@ -488,8 +628,26 @@ def write_to_db(
     # get_session_context() commits on clean exit, rolls back on error.   #
     # ------------------------------------------------------------------ #
     with get_session_context() as session:
+        # Preserve authoritative sources — never let a PDF ingest overwrite a
+        # 13f_filing or bdc_filing source on an existing dim_fund row.
+        existing_fund = session.get(DimFund, fund_id)
+        if existing_fund is not None and existing_fund.source in ("13f_filing", "bdc_filing"):
+            fund_record["source"] = existing_fund.source
+
         _pg_upsert(session, DimFund, [fund_record], ["fund_id"])
         logger.info("  → dim_fund: 1 row")
+
+        # Merge strategy: preserve existing non-NULL values for fields the
+        # current doc_type doesn't populate, so lp_statement and
+        # financial_statements don't clobber each other when they share the
+        # same fund_report_id.
+        existing_report = session.get(FactFundReport, fund_report_id)
+        if existing_report is not None:
+            for field, new_val in fund_report.items():
+                if new_val is None:
+                    existing_val = getattr(existing_report, field, None)
+                    if existing_val is not None:
+                        fund_report[field] = existing_val
 
         _pg_upsert(session, FactFundReport, [fund_report], ["fund_report_id"])
         logger.info("  → fact_fund_report: 1 row")
@@ -532,7 +690,7 @@ def ingest_fund_folder(
         manifest = {}
 
     fund_name = fund_config.get("fund_name", fund_config["folder"])
-    fund_id = _make_uuid(f"pdf_fund_{fund_name}")
+    fund_id = fund_config.get("fund_id") or _make_uuid(f"pdf_fund_{fund_name}")
 
     fund_record = {
         "fund_id": fund_id,
@@ -657,6 +815,7 @@ def ingest_fund_folder(
                 "contributions_usd": extracted.get("contributions_usd") if _is_lp else None,
                 "distributions_usd": extracted.get("distributions_usd") if _is_lp else None,
                 "unfunded_commitment_usd": extracted.get("unfunded_commitment_usd") if _is_lp else None,
+                "total_net_assets_usd": extracted.get("total_net_assets_usd") if doc_type == "financial_statements" else None,
                 "source": SOURCE,
             })
             for row_num, h in enumerate(extracted.get("holdings", []), start=1):
@@ -743,21 +902,97 @@ def ingest_all_funds(
     known_folders = {cfg["folder"] for cfg in FUND_CONFIG}
     work_list: list[dict] = list(FUND_CONFIG)
 
+    # Load dim_fund once — used for (a) fund_id injection and (b) fuzzy matching
+    dim_fund_rows: list[dict] = []
+    if db_mode:
+        try:
+            df = get_all(DimFund)
+            if not df.empty:
+                dim_fund_rows = df.to_dict("records")
+        except Exception as exc:
+            logger.warning("Could not load dim_fund for fund_id lookup: %s", exc)
+
+    # Inject existing fund_ids into configured work-list entries so ingestion
+    # writes to the correct dim_fund row rather than creating duplicates.
+    # Only fills in fund_id when the config doesn't already specify one.
+    if dim_fund_rows:
+        name_to_id: dict[str, str] = {
+            r["fund_name"]: r["fund_id"]
+            for r in dim_fund_rows
+            if r.get("fund_name") and r.get("fund_id")
+        }
+        work_list = [
+            {**cfg, "fund_id": cfg.get("fund_id") or name_to_id.get(cfg.get("fund_name", ""))}
+            for cfg in work_list
+        ]
+        injected = sum(
+            1 for cfg in work_list
+            if cfg.get("fund_id") and not cfg.get("_auto_discovered")
+        )
+        logger.info("Injected fund_ids for %d/%d configured funds", injected, len(work_list))
+
+    # Persistent folder→fund cache stored inside the manifest under "_folder_map"
+    folder_map: dict[str, dict] = manifest.get("_folder_map", {})
+
     if base_path.exists():
         for subfolder in sorted(base_path.iterdir()):
             if not subfolder.is_dir():
                 continue
             if subfolder.name in known_folders:
                 continue
-            logger.warning(
-                "Unknown fund folder found: %s — inferring config", subfolder.name
-            )
+
+            if subfolder.name not in folder_map:
+                # First time we've seen this folder — attempt fuzzy match
+                match = _match_folder_to_fund(subfolder.name, dim_fund_rows)
+                if match:
+                    matched_fund, confidence = match
+                    doc_types = _infer_doc_types(matched_fund.get("fund_type", ""))
+                    folder_map[subfolder.name] = {
+                        "fund_id":   matched_fund["fund_id"],
+                        "fund_name": matched_fund["fund_name"],
+                        "fund_type": matched_fund.get("fund_type", "unknown"),
+                        "doc_types": doc_types,
+                        "confidence": round(confidence, 4),
+                        "matched_at": pd.Timestamp.now().date().isoformat(),
+                    }
+                    logger.info(
+                        "Auto-matched folder '%s' → '%s' (confidence: %.2f)",
+                        subfolder.name, matched_fund["fund_name"], confidence,
+                    )
+                else:
+                    inferred_name = subfolder.name.replace("_", " ").replace("-", " ").title()
+                    folder_map[subfolder.name] = {
+                        "fund_id":   _make_uuid(f"pdf_fund_{inferred_name}"),
+                        "fund_name": inferred_name,
+                        "fund_type": "unknown",
+                        "doc_types": ["financial_statements", "lp_statement", "transparency_report"],
+                        "confidence": 0.0,
+                        "matched_at": pd.Timestamp.now().date().isoformat(),
+                    }
+                    logger.info(
+                        "Unknown folder '%s' — no match found, creating new fund",
+                        subfolder.name,
+                    )
+            else:
+                cached = folder_map[subfolder.name]
+                logger.debug(
+                    "Folder '%s' already mapped → '%s' (cached)",
+                    subfolder.name, cached["fund_name"],
+                )
+
+            cached = folder_map[subfolder.name]
             work_list.append({
-                "folder": subfolder.name,
-                "fund_type": "unknown",
-                "doc_types": ["financial_statements", "lp_statement", "transparency_report"],
+                "folder":           subfolder.name,
+                "fund_id":          cached["fund_id"],
+                "fund_name":        cached["fund_name"],
+                "fund_type":        cached["fund_type"],
+                "doc_types":        cached["doc_types"],
                 "_auto_discovered": True,
+                "_confidence":      cached["confidence"],
             })
+
+    # Persist updated folder map back into the manifest
+    manifest["_folder_map"] = folder_map
 
     configured_count = len(FUND_CONFIG)
     discovered_count = len(work_list) - configured_count

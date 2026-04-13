@@ -375,80 +375,46 @@ def add_bdc_funds_to_portfolio(
 # ---------------------------------------------------------------------------
 
 def load_and_merge_sources(csv_mode: bool = False) -> dict[str, pd.DataFrame]:
-    """Load all data sources and merge them into unified Silver tables."""
+    """Load BDC data sources into unified Silver tables (no synthetic data)."""
     print("Loading data sources...")
     print(f"  Mode: {'CSV' if csv_mode else 'PostgreSQL'}")
 
-    # Load synthetic tables (from DB or CSV based on mode)
-    synthetic = load_synthetic_tables(csv_mode=csv_mode)
-    synthetic_counts = {
-        name: len(df) if df is not None else 0
-        for name, df in synthetic.items()
-    }
-
-    # Load BDC tables
     bdc = load_bdc_tables()
-    bdc_counts = {
-        name: len(df) if df is not None else 0
-        for name, df in bdc.items()
-    }
-
-    print(f"  Synthetic tables: {sum(1 for v in synthetic.values() if v is not None)} loaded")
+    bdc_counts = {name: len(df) if df is not None else 0 for name, df in bdc.items()}
     print(f"  BDC tables: {sum(1 for v in bdc.values() if v is not None)} loaded")
 
-    # Merge funds
-    print("\nMerging funds...")
-    merged_funds = merge_funds(synthetic["dim_fund"], bdc["funds"])
+    print("\nLoading funds...")
+    merged_funds = merge_funds(None, bdc["funds"])
 
-    # Merge fund reports
-    print("Merging fund reports...")
-    merged_reports = merge_fund_reports(synthetic["fact_fund_report"], bdc["reports"])
+    print("Loading fund reports...")
+    merged_reports = merge_fund_reports(None, bdc["reports"])
 
-    # Merge companies (create new entries for BDC companies).
-    # In DB mode, check ALL existing companies (not just synthetic) to avoid
-    # creating duplicate stubs for companies already ingested from PDF/13F sources.
-    print("Merging companies...")
+    # Check ALL existing companies to avoid duplicating stubs from PDF/13F ingestion.
+    print("Loading companies...")
     all_existing_companies = get_all(DimCompany) if not csv_mode else None
-    merged_companies = merge_companies(
-        synthetic["dim_company"], bdc["holdings"], all_existing_companies
-    )
+    merged_companies = merge_companies(None, bdc["holdings"], all_existing_companies)
 
-    # Merge holdings
-    print("Merging holdings...")
-    merged_holdings = merge_holdings(synthetic["fact_reported_holding"], bdc["holdings"])
+    print("Loading holdings...")
+    merged_holdings = merge_holdings(None, bdc["holdings"])
 
-    # Add taxonomy nodes for BDC sectors
     print("Adding taxonomy nodes for BDC sectors...")
     bdc_sectors = extract_bdc_sectors(bdc["holdings"])
-    merged_taxonomy = add_taxonomy_nodes_for_bdc_sectors(
-        synthetic["dim_taxonomy_node"],
-        bdc_sectors,
-        synthetic["meta_taxonomy_version"],
-    )
+    existing_taxonomy = get_all(DimTaxonomyNode) if not csv_mode else None
+    existing_taxonomy = existing_taxonomy if existing_taxonomy is not None and not existing_taxonomy.empty else None
+    merged_taxonomy = add_taxonomy_nodes_for_bdc_sectors(existing_taxonomy, bdc_sectors, None)
 
-    # Portfolio and other tables pass through with source column
-    merged_portfolio = add_bdc_funds_to_portfolio(
-        add_source_column(synthetic["dim_portfolio"], SOURCE_SYNTHETIC),
-        bdc["funds"],
-    )
-    merged_aliases = add_source_column(synthetic["dim_entity_alias"], SOURCE_SYNTHETIC)
-    merged_taxonomy_version = add_source_column(synthetic["meta_taxonomy_version"], SOURCE_SYNTHETIC)
-
-    # Prepare output
     merged = {
         "dim_fund": merged_funds,
         "fact_fund_report": merged_reports,
         "dim_company": merged_companies,
         "fact_reported_holding": merged_holdings,
         "dim_taxonomy_node": merged_taxonomy,
-        "dim_portfolio": merged_portfolio,
-        "dim_entity_alias": merged_aliases if merged_aliases is not None else pd.DataFrame(),
-        "meta_taxonomy_version": merged_taxonomy_version if merged_taxonomy_version is not None else pd.DataFrame(),
+        "dim_portfolio": pd.DataFrame(),
+        "dim_entity_alias": pd.DataFrame(),
+        "meta_taxonomy_version": pd.DataFrame(),
     }
 
-    # Calculate merge statistics
     stats = {
-        "synthetic": synthetic_counts,
         "bdc": bdc_counts,
         "merged": {name: len(df) if df is not None and not df.empty else 0 for name, df in merged.items()},
     }
@@ -503,39 +469,20 @@ def write_merged_tables(merged: dict[str, pd.DataFrame], csv_mode: bool = False)
 
 
 def print_summary(stats: dict) -> None:
-    """Print summary of merge operation."""
+    """Print summary of load operation."""
     print("\n" + "=" * 60)
-    print("DATA SOURCE MERGE SUMMARY")
+    print("DATA SOURCE LOAD SUMMARY")
     print("=" * 60)
 
-    print("\nSource Counts:")
-    print("  Synthetic:")
-    for name, count in stats["synthetic"].items():
-        if count > 0:
-            print(f"    {name}: {count} rows")
-
-    print("  BDC:")
+    print("\nBDC Source Counts:")
     for name, count in stats["bdc"].items():
-        if count > 0:
-            print(f"    {name}: {count} rows")
-
-    print("\nMerged Counts:")
-    for name, count in stats["merged"].items():
         if count > 0:
             print(f"  {name}: {count} rows")
 
-    # Calculate totals
-    total_synthetic_holdings = stats["synthetic"].get("fact_reported_holding", 0)
-    total_bdc_holdings = stats["bdc"].get("holdings", 0)
-    total_merged_holdings = stats["merged"].get("fact_reported_holding", 0)
-
-    total_synthetic_funds = stats["synthetic"].get("dim_fund", 0)
-    total_bdc_funds = stats["bdc"].get("funds", 0)
-    total_merged_funds = stats["merged"].get("dim_fund", 0)
-
-    print("\nTotals:")
-    print(f"  Holdings: {total_synthetic_holdings} (synthetic) + {total_bdc_holdings} (BDC) = {total_merged_holdings} (merged)")
-    print(f"  Funds: {total_synthetic_funds} (synthetic) + {total_bdc_funds} (BDC) = {total_merged_funds} (merged)")
+    print("\nWritten Counts:")
+    for name, count in stats["merged"].items():
+        if count > 0:
+            print(f"  {name}: {count} rows")
 
     print("\n" + "=" * 60)
 
