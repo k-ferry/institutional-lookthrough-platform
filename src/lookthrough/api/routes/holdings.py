@@ -19,6 +19,7 @@ from src.lookthrough.db.models import (
     DimFund,
     EntityResolutionLog,
     FactFundReport,
+    FactLpScaledExposure,
     FactReportedHolding,
     User,
 )
@@ -71,12 +72,18 @@ def list_holdings(
     _current_user: User = Depends(get_current_user),
 ) -> dict:
     """Return a paginated list of holdings with full metadata and optional filters."""
-    # Subquery: total reported value per fund-report period (for pct_of_fund)
+    # Subquery: total scaled value per fund-report period (for pct_of_fund denominator).
+    # Computed on a separate join of FactLpScaledExposure to avoid SQLAlchemy alias
+    # conflicts when the same table is also joined in the main query.
+    _lse_sub = FactLpScaledExposure.__table__.alias("lse_sub")
     fr_totals_sq = (
         db.query(
             FactReportedHolding.fund_report_id.label("frid"),
-            func.sum(FactReportedHolding.reported_value_usd).label("report_total"),
+            func.sum(
+                func.coalesce(_lse_sub.c.scaled_value_usd, FactReportedHolding.reported_value_usd)
+            ).label("report_total"),
         )
+        .outerjoin(_lse_sub, FactReportedHolding.reported_holding_id == _lse_sub.c.reported_holding_id)
         .group_by(FactReportedHolding.fund_report_id)
         .subquery()
     )
@@ -85,8 +92,9 @@ def list_holdings(
     sector_col = _sector_col()
     industry_col = _industry_col()
     country_col = _country_col()
+    effective_value = func.coalesce(FactLpScaledExposure.scaled_value_usd, FactReportedHolding.reported_value_usd)
     pct_col = (
-        FactReportedHolding.reported_value_usd
+        effective_value
         * 100.0
         / func.nullif(fr_totals_sq.c.report_total, 0)
     ).label("pct_of_fund")
@@ -102,6 +110,7 @@ def list_holdings(
             industry_col.label("industry"),
             country_col.label("country"),
             FactReportedHolding.reported_value_usd,
+            FactLpScaledExposure.scaled_value_usd,
             pct_col,
             FactReportedHolding.as_of_date,
             FactReportedHolding.source,
@@ -111,6 +120,7 @@ def list_holdings(
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
         .join(DimFund, FactFundReport.fund_id == DimFund.fund_id)
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .outerjoin(FactLpScaledExposure, FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
         .outerjoin(fr_totals_sq, fr_totals_sq.c.frid == FactReportedHolding.fund_report_id)
     )
 
@@ -132,7 +142,7 @@ def list_holdings(
         query = query.filter(FactReportedHolding.reported_value_usd.isnot(None))
 
     sort_col_map = {
-        "reported_value_usd": FactReportedHolding.reported_value_usd,
+        "reported_value_usd": effective_value,
         "company_name": company_name_col,
         "fund_name": DimFund.fund_name,
         "sector": sector_col,
@@ -159,7 +169,10 @@ def list_holdings(
             "sector": row.sector,
             "industry": row.industry,
             "country": row.country,
-            "reported_value_usd": (
+            "reported_value_usd": float(
+                row.scaled_value_usd if row.scaled_value_usd is not None else row.reported_value_usd
+            ) if (row.scaled_value_usd is not None or row.reported_value_usd is not None) else None,
+            "raw_value_usd": (
                 float(row.reported_value_usd) if row.reported_value_usd is not None else None
             ),
             "pct_of_fund": (
@@ -234,11 +247,31 @@ def get_filter_options(
     industry_col = _industry_col()
     country_col = _country_col()
 
-    # Global totals (unfiltered)
-    totals = db.query(
-        func.count(FactReportedHolding.reported_holding_id).label("total_holdings"),
-        func.sum(FactReportedHolding.reported_value_usd).label("total_exposure"),
-    ).one()
+    # Global totals: holding count from raw table, exposure from scaled (per-fund latest)
+    _lp_name = "Northbridge Endowment Fund"
+    _latest_sq = (
+        db.query(
+            FactLpScaledExposure.fund_id.label("fund_id"),
+            func.max(FactLpScaledExposure.as_of_date).label("max_date"),
+        )
+        .filter(FactLpScaledExposure.lp_name == _lp_name)
+        .group_by(FactLpScaledExposure.fund_id)
+        .subquery()
+    )
+    total_holdings = (
+        db.query(func.count(FactReportedHolding.reported_holding_id)).scalar() or 0
+    )
+    _scaled_total = (
+        db.query(func.sum(FactLpScaledExposure.scaled_value_usd))
+        .join(
+            _latest_sq,
+            (FactLpScaledExposure.fund_id == _latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == _latest_sq.c.max_date),
+        )
+        .filter(FactLpScaledExposure.lp_name == _lp_name)
+        .scalar()
+    )
+    total_exposure = float(_scaled_total) if _scaled_total else 0.0
 
     # Funds that have holdings
     fund_rows = (
@@ -322,8 +355,8 @@ def get_filter_options(
     )
 
     return {
-        "total_holdings": totals.total_holdings or 0,
-        "total_exposure": float(totals.total_exposure) if totals.total_exposure else 0.0,
+        "total_holdings": total_holdings,
+        "total_exposure": total_exposure,
         "funds": funds,
         "sectors": sectors,
         "industries": industries,
