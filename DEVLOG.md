@@ -258,3 +258,89 @@ Add to Phase 8/9 roadmap.
 - Classification working across 3 paths: synthetic, GICS mapping, per-company AI
 
 **Next session:** Geography exposure page, GICS drill-down, export functionality
+
+### 2026-04-09 — Session 8
+
+**What was built:**
+- Fund Detail page full redesign — sector/industry/geography breakdown, 
+  paginated holdings table, exposure trend chart for all 20 funds, 
+  source-aware labeling, BDC point-in-time banner, unclassified handling
+- Holdings page full rewrite — multi-source data, industry column, 
+  pct_of_fund, cascading sector/industry filters, export passes filters
+- Dashboard redesign — 5 stat cards, source breakdown cards, 
+  all-source exposure trend, fund lineup grouped by source type
+- Funds page created — portfolio allocation donut chart by fund type, 
+  horizontal bar chart by individual fund, fund cards grid with top sectors
+- Front Office / Ops separation — source info removed from all Front 
+  Office pages, kept as subtle label on Fund Detail only
+- New API endpoints: /api/funds/allocation, /api/dashboard/funds-summary,
+  /api/holdings/sources, /api/holdings/filters, /api/funds/{id}/holdings,
+  /api/funds/{id}/exposure-trend
+
+**Key numbers:**
+- 20 funds across 4 sources now fully surfaced in UI
+- 71.5% classification coverage (cut short by API credit exhaustion)
+- All Front Office pages now exposure-focused, no pipeline/source UI
+
+**Known data quality issues (next session):**
+- BDC reported_sector strings not fully mapped to GICS 
+  (free text like "AI Security" appearing in sector filters)
+- ~28.5% of companies still unclassified
+- Some reported_value_usd inconsistencies across source types
+
+**Next session:** Data quality cleanup — GICS mapping of BDC 
+reported_sector strings, classification run with fresh API credits, 
+value normalization across sources
+
+### 2026-04-13 — Session 9
+
+**What was built:**
+- LP ownership scaling infrastructure — new fact_lp_scaled_exposure and
+  fact_lp_position tables storing Northbridge Endowment's scaled exposure
+  to each holding across all 12 funds
+- Position-percentage scaling approach: scaled_value = LP NAV x
+  (holding_value / total_fund_value). More robust than ownership % 
+  approach — works correctly with partial holding snapshots (BDC 10-Ks)
+- total_net_assets_usd added to fact_fund_report — extracted from balance
+  sheet in quarterly financial statement PDFs via updated Haiku prompt
+- Fund report merge fix — LP statements and financial statements for the
+  same fund+quarter now merge nav_usd and total_net_assets_usd into one
+  row instead of overwriting each other
+- LP positions defined for all 12 funds:
+  - Private market funds (PDF): ownership derived from nav_usd /
+    total_net_assets_usd per quarter from real document extraction
+  - BDC/13F funds: LP NAV interpolated from config (ARCC $62-69M,
+    MAIN $40-45M, OBDC $34-38M, Brightline ETF $11-14M, Vertex $13-15M)
+- 5 new LP statement folders added to OneDrive ingestion:
+  arcc, main, obdc, brightline_etf, vertex_macro (40 new PDFs)
+- FUND_CONFIG updated with 5 new entries + runtime fund_id injection
+  to ensure LP statements write to correct existing dim_fund rows
+- Source protection fix — PDF ingester no longer overwrites source field
+  of existing 13f_filing or bdc_filing funds
+- Selective re-ingest UI — fund checklist with checkboxes, Re-ingest
+  Selected button, confirmation dialog, multi-fund filter in backend
+- Refresh Manifest button fixed — better error handling, isFetching
+  state, amber warning when OneDrive folder offline
+- Crestview LP statement support added to FUND_CONFIG doc_types
+- Synthetic data permanently deleted and generation disabled:
+  - 8 synthetic funds (Blackstone, KKR, Carlyle, Apollo, TPG, Vanguard,
+    BlackRock, Fidelity) removed from DB
+  - Synthetic Data Generation step removed from run_pipeline.py
+  - load_sources.py simplified — no more synthetic table merging
+
+**Key numbers:**
+- 12 real funds (3 BDC + 7 PDF private/hedge/ETF + 2 13F)
+- 5,826 total holdings across all sources
+- 5,731 scaled holdings in fact_lp_scaled_exposure
+- $4.27B total Northbridge Endowment exposure
+- 77 fund-quarter LP positions computed
+- 8,000 audit events
+
+**Next session priorities:**
+- Frontend toggle: Fund View (raw) vs Portfolio View (scaled to
+  Northbridge ownership) across Holdings, Funds, and Fund Detail pages
+- Surface scaled_value_usd in the UI
+- Run --classify with fresh Anthropic credits to push classification
+  coverage above 85%
+- Generate remaining 4 quarters of PDF documents (currently 4 quarters,
+  planned 8 for private market funds)
