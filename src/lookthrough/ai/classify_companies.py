@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -37,6 +38,36 @@ class CompanyClassificationOut(BaseModel):
     confidence: float = Field(..., description="Float in [0,1]")
     rationale: str = Field(..., description="1-3 sentences")
     assumptions: list[str] = Field(default_factory=list)
+
+
+INSTRUMENT_RULES: list[tuple[list[str], str, str]] = [
+    # Crypto/Digital Assets
+    (["bitcoin", "ethereum", "ether", "crypto", "blockchain", "btc", "eth",
+      "digital asset", "defi", "web3"], "Financials", "Capital Markets"),
+    # ETFs and Index Funds
+    (["etf", "ishares", "vanguard etf", "spdr", "invesco", "proshares",
+      "direxion", "wisdom tree"], "Financials", "Capital Markets"),
+    # SPACs and Acquisition vehicles
+    (["spac", "acquisition corp", "blank check"], "Financials", "Capital Markets"),
+    # Warrants and Options
+    (["warrant", "rights", "call option"], "Financials", "Capital Markets"),
+    # Government/Treasury
+    (["treasury", "t-bill", "t-bond", "tbill", "us government"],
+     "Financials", "Capital Markets"),
+]
+
+
+def _check_instrument_rules(company_name: str) -> Optional[tuple[str, str]]:
+    """Return (sector, industry) if name matches an instrument rule, else None."""
+    name_lower = company_name.lower()
+    for keywords, sector, industry in INSTRUMENT_RULES:
+        if any(kw in name_lower for kw in keywords):
+            return sector, industry
+    return None
+
+
+# Strict ISO-3166-1 alpha-2 pattern: exactly two uppercase letters
+_ISO2_RE = re.compile(r"^[A-Z]{2}$")
 
 
 @dataclass(frozen=True)
@@ -239,6 +270,172 @@ def _lookup_node_id(taxonomy: pd.DataFrame, taxonomy_type: str, node_name: str) 
     return "00000000-0000-0000-0000-000000000000"
 
 
+def _classify_country_one(client: Anthropic, cfg: ClassifierConfig, company_name: str) -> Optional[str]:
+    """Ask Haiku for the ISO-2 country code of a single company.
+
+    Returns a valid 2-letter code (e.g. 'US') or None if the model reports it
+    cannot determine the country, or if the response is not a bare 2-letter code.
+    Raises RateLimitError so the retry wrapper can handle backoff.
+    """
+    prompt = (
+        f"What country is '{company_name}' headquartered or domiciled in? "
+        "Return ONLY the ISO 2-letter country code (e.g. US, GB, DE, JP, CN). "
+        "If this is an opaque holding company, SPAC, or you cannot determine "
+        "the country with confidence, return NULL. "
+        "Do not explain. Return only the code or NULL."
+    )
+    response = client.messages.create(
+        model=cfg.model,
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = response.content[0].text.strip().upper()
+    if raw in ("NULL", "NONE", "N/A", ""):
+        return None
+    if _ISO2_RE.match(raw):
+        return raw
+    return None  # reject anything that isn't exactly a 2-letter code
+
+
+def _classify_country_with_retry(
+    client: Anthropic, cfg: ClassifierConfig, company_name: str
+) -> Optional[str]:
+    """Wrapper around _classify_country_one that retries once on RateLimitError."""
+    try:
+        return _classify_country_one(client, cfg, company_name)
+    except RateLimitError:
+        print("Rate limited — waiting 60s and retrying")
+        time.sleep(60)
+        return _classify_country_one(client, cfg, company_name)
+
+
+def _update_dim_company_country(country_updates: dict[str, str]) -> None:
+    """Write primary_country values back to dim_company in PostgreSQL.
+
+    Loads the full company records first so all other columns are preserved
+    through the upsert (same pattern as _update_dim_company_from_classifications).
+    """
+    all_companies = get_all(DimCompany)
+    if all_companies.empty:
+        return
+
+    records = []
+    for _, row in all_companies.iterrows():
+        cid = str(row["company_id"])
+        if cid not in country_updates:
+            continue
+        record = row.to_dict()
+        record["primary_country"] = country_updates[cid]
+        records.append(record)
+
+    if records:
+        upsert_rows(DimCompany, records, ["company_id"])
+        print(f"Updated {len(records)} dim_company rows (primary_country)")
+    else:
+        print("No dim_company rows needed updating for country.")
+
+
+def classify_countries(
+    client: Anthropic,
+    cfg: ClassifierConfig,
+    companies: pd.DataFrame,
+    csv_mode: bool,
+    silver_path: Path,
+    limit: int,
+) -> None:
+    """Classify primary_country for companies where it is NULL.
+
+    Rules applied in priority order (no API call for rules 1–2):
+      1. source = '13f_filing' → 'US'  (13F only covers US-listed securities)
+      2. Instrument rule match → skip  (financial instruments, not operating companies)
+      3. Haiku free-text prompt → ISO-2 code or None
+
+    Updates dim_company.primary_country in-place (CSV or PostgreSQL).
+    """
+    # Filter to companies with null/blank primary_country
+    if "primary_country" in companies.columns:
+        null_mask = companies["primary_country"].isna() | (
+            companies["primary_country"].astype(str).str.strip() == ""
+        )
+    else:
+        null_mask = pd.Series([True] * len(companies), index=companies.index)
+
+    to_classify = companies[null_mask].copy()
+
+    if to_classify.empty:
+        print("Country classification: no companies with null primary_country.")
+        return
+
+    source_col = "source" if "source" in to_classify.columns else None
+    country_updates: dict[str, str] = {}
+    rule_count = 0
+    skipped_instrument = 0
+
+    # --- Rule 1: 13F-sourced companies are always US-listed ---
+    if source_col:
+        mask_13f = to_classify[source_col].astype(str) == "13f_filing"
+        for _, row in to_classify[mask_13f].iterrows():
+            country_updates[str(row["company_id"])] = "US"
+            rule_count += 1
+        to_classify = to_classify[~mask_13f].copy()
+
+    print(
+        f"Country classification: {rule_count} set to US via 13F rule, "
+        f"{len(to_classify)} remaining for AI (capped at {limit})"
+    )
+
+    # Cap API calls at limit
+    to_classify = to_classify.head(limit).copy()
+    total = len(to_classify)
+    api_count = 0
+
+    for i, (_, c) in enumerate(to_classify.iterrows(), start=1):
+        company_id = str(c["company_id"])
+        company_name = str(c.get("company_name", c.get("raw_company_name", "")))
+
+        # --- Rule 2: Skip instrument rule matches ---
+        if _check_instrument_rules(company_name) is not None:
+            skipped_instrument += 1
+            continue
+
+        # --- Rule 3: Haiku API call ---
+        country_code = _classify_country_with_retry(client, cfg, company_name)
+        api_count += 1
+
+        if country_code:
+            country_updates[company_id] = country_code
+            print(f"Country classified [{i}/{total}] {company_name} → {country_code}")
+        else:
+            print(f"Country unclassifiable [{i}/{total}] {company_name}")
+
+        if i < total:
+            time.sleep(0.3)
+
+    print(
+        f"Country classification complete: {rule_count} via 13F rule, "
+        f"{api_count} API calls, {skipped_instrument} instrument skips, "
+        f"{len(country_updates)} total updates"
+    )
+
+    if not country_updates:
+        print("No country updates to write.")
+        return
+
+    # --- Write back to dim_company ---
+    if csv_mode:
+        dim_path = silver_path / "dim_company.csv"
+        if not dim_path.exists():
+            print(f"Warning: {dim_path} not found — cannot write country updates.")
+            return
+        df = pd.read_csv(dim_path)
+        for cid, code in country_updates.items():
+            df.loc[df["company_id"].astype(str) == cid, "primary_country"] = code
+        df.to_csv(dim_path, index=False)
+        print(f"Wrote {len(country_updates)} country updates to {dim_path}")
+    else:
+        _update_dim_company_country(country_updates)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20, help="Max companies to classify (V1 safety).")
@@ -246,7 +443,7 @@ def main() -> None:
         "--taxonomy-type",
         type=str,
         default="industry",
-        choices=["sector", "industry", "geography"],
+        choices=["sector", "industry", "geography", "country"],
         help="Taxonomy type to classify.",
     )
     parser.add_argument("--csv", action="store_true", help="Use CSV mode instead of PostgreSQL")
@@ -285,6 +482,11 @@ def main() -> None:
                 companies["country_taxonomy_node_id"].isna()
                 | (companies["country_taxonomy_node_id"].astype(str) == "")
             )
+        elif args.taxonomy_type == "country":
+            unclassified_mask = (
+                companies["primary_country"].isna()
+                | (companies["primary_country"].astype(str).str.strip() == "")
+            )
         else:  # sector
             unclassified_mask = (
                 companies["primary_sector"].isna()
@@ -293,6 +495,19 @@ def main() -> None:
 
         companies = companies[unclassified_mask].copy()
         print(f"Found {len(companies)} unclassified companies (taxonomy_type={args.taxonomy_type})")
+
+    # Country classification diverges here: no taxonomy nodes, writes directly to dim_company
+    if args.taxonomy_type == "country":
+        client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        classify_countries(
+            client=client,
+            cfg=cfg,
+            companies=companies,
+            csv_mode=csv_mode,
+            silver_path=silver,
+            limit=args.limit,
+        )
+        return
 
     # Build allowed node list for the requested taxonomy type (used in single-step path)
     tax = taxonomy[taxonomy["taxonomy_type"] == args.taxonomy_type].copy()
@@ -400,6 +615,37 @@ def main() -> None:
                 skipped += 1
                 continue
 
+            # Pre-classification: instrument rules bypass both API calls
+            instrument_match = _check_instrument_rules(company_name)
+            if instrument_match is not None:
+                matched_sector, matched_industry = instrument_match
+                print(f"Pre-classified {company_name} as {matched_sector}/{matched_industry} (instrument rule match)")
+                if not sector_done:
+                    sector_result = CompanyClassificationOut(
+                        taxonomy_type="sector",
+                        node_name=matched_sector,
+                        confidence=1.0,
+                        rationale="Pre-classified by instrument rule — no API call.",
+                        assumptions=[],
+                    )
+                    sec_node_id = _lookup_node_id(taxonomy, "sector", matched_sector)
+                    out_rows.append(
+                        _make_row(run_id, company_id, company_name, sector_result, sec_node_id, "instrument_rule", cfg.prompt_version)
+                    )
+                if not industry_done:
+                    industry_result = CompanyClassificationOut(
+                        taxonomy_type="industry",
+                        node_name=matched_industry,
+                        confidence=1.0,
+                        rationale="Pre-classified by instrument rule — no API call.",
+                        assumptions=[],
+                    )
+                    ind_node_id = _lookup_node_id(taxonomy, "industry", matched_industry)
+                    out_rows.append(
+                        _make_row(run_id, company_id, company_name, industry_result, ind_node_id, "instrument_rule", cfg.prompt_version)
+                    )
+                continue
+
             # Step 1 — Sector (skip if already classified)
             sector_name: Optional[str] = None
             if sector_done:
@@ -485,6 +731,25 @@ def main() -> None:
             if (company_id, args.taxonomy_type) in already_classified:
                 skipped += 1
                 continue
+
+            # Pre-classification: instrument rules bypass the API call (sector only)
+            if args.taxonomy_type == "sector":
+                instrument_match = _check_instrument_rules(company_name)
+                if instrument_match is not None:
+                    matched_sector, _ = instrument_match
+                    print(f"Pre-classified {company_name} as Financials/Capital Markets (instrument rule match)")
+                    result = CompanyClassificationOut(
+                        taxonomy_type="sector",
+                        node_name=matched_sector,
+                        confidence=1.0,
+                        rationale="Pre-classified by instrument rule — no API call.",
+                        assumptions=[],
+                    )
+                    node_id = _lookup_node_id(taxonomy, "sector", matched_sector)
+                    out_rows.append(
+                        _make_row(run_id, company_id, company_name, result, node_id, "instrument_rule", cfg.prompt_version)
+                    )
+                    continue
 
             n = len(allowed_nodes)
             est = _estimate_tokens(n, company_name, company_desc)

@@ -442,7 +442,13 @@ export default function FundDetailPage() {
 
   const isSingleQuarter = (fund.quarter_count ?? 0) <= 1
   const sectorCount = fund.sector_breakdown?.length ?? 0
-  const hasGeography = fund.geography_breakdown?.some((g) => g.value_usd > 0) ?? false
+
+  const _geoBreakdown = fund.geography_breakdown ?? []
+  const _geoTotal = _geoBreakdown.reduce((sum, g) => sum + (g.value_usd ?? 0), 0)
+  const _geoKnown = _geoBreakdown
+    .filter((g) => g.country !== 'Unknown')
+    .reduce((sum, g) => sum + (g.value_usd ?? 0), 0)
+  const hasGeography = _geoTotal > 0 && _geoKnown / _geoTotal > 0.20
 
   // Prepare chart data
   const sectorChartData = (fund.sector_breakdown ?? []).map((s) => ({

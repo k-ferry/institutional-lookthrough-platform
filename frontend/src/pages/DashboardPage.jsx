@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
@@ -450,6 +450,23 @@ export default function DashboardPage() {
     staleTime: 5 * 60 * 1000,
   })
 
+  // Determine if geography data has enough known countries to be worth showing
+  const { data: geoBreakdownData } = useQuery({
+    queryKey: ['dashboard-geography-breakdown'],
+    queryFn: () => fetchJSON('/api/dashboard/geography-breakdown'),
+    staleTime: 10 * 60 * 1000,
+  })
+  const _geoTotal = (geoBreakdownData ?? []).reduce((sum, g) => sum + (g.value_usd ?? 0), 0)
+  const _geoKnown = (geoBreakdownData ?? [])
+    .filter((g) => g.country !== 'Unknown')
+    .reduce((sum, g) => sum + (g.value_usd ?? 0), 0)
+  const showGeoToggle = _geoTotal > 0 && _geoKnown / _geoTotal > 0.20
+
+  // If geography toggle disappears while selected, fall back to sector
+  useEffect(() => {
+    if (!showGeoToggle && trendDim === 'geography') setTrendDim('sector')
+  }, [showGeoToggle, trendDim])
+
   // Source breakdown from stats
   const sourceBreakdown = stats?.source_breakdown ?? []
   const sourceMap = Object.fromEntries(sourceBreakdown.map((s) => [s.source, s]))
@@ -543,7 +560,7 @@ export default function DashboardPage() {
               </p>
             </div>
             <div className="flex items-center gap-1">
-              {['sector', 'geography'].map((dim) => (
+              {['sector', ...(showGeoToggle ? ['geography'] : [])].map((dim) => (
                 <button
                   key={dim}
                   onClick={() => setTrendDim(dim)}

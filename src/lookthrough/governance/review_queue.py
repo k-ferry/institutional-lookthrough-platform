@@ -120,10 +120,25 @@ def generate_review_queue(csv_mode: bool = False) -> pd.DataFrame:
             })
 
     # Condition B: AI classification where node_name was null (unclassifiable)
-    # Detected by taxonomy_node_id being the null UUID
+    # Detected by taxonomy_node_id being the null UUID, but only if dim_company
+    # still has no primary_sector — prevents false positives for companies that
+    # were later classified by the GICS mapping fallback.
     if not classifications.empty and "taxonomy_node_id" in classifications.columns:
         null_classifications = classifications[
             classifications["taxonomy_node_id"] == "00000000-0000-0000-0000-000000000000"
+        ]
+        # Build set of company_ids that already have a sector in dim_company
+        classified_sector_ids: set = set()
+        if not dim_company.empty and "primary_sector" in dim_company.columns:
+            classified_sector_ids = set(
+                dim_company.loc[
+                    dim_company["primary_sector"].notna() &
+                    (dim_company["primary_sector"].astype(str).str.strip() != ""),
+                    "company_id",
+                ].tolist()
+            )
+        null_classifications = null_classifications[
+            ~null_classifications["company_id"].isin(classified_sector_ids)
         ]
         for _, row in null_classifications.iterrows():
             confidence = float(row.get("confidence", 0.0))
