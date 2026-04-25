@@ -25,6 +25,7 @@ from src.lookthrough.db.models import (
     FactExposureClassification,
     FactFundReport,
     FactInferredExposure,
+    FactLpScaledExposure,
     FactReportedHolding,
     FactReviewQueueItem,
     GICSMapping,
@@ -57,6 +58,7 @@ _MODEL_MAP = {
     "fact_fund_report.csv": FactFundReport,
     "fact_reported_holding.csv": FactReportedHolding,
     "fact_inferred_exposure.csv": FactInferredExposure,
+    "fact_lp_scaled_exposure.csv": FactLpScaledExposure,
     "fact_aggregation_snapshot.csv": FactAggregationSnapshot,
     "fact_exposure_classification.csv": FactExposureClassification,
     "fact_review_queue_item.csv": FactReviewQueueItem,
@@ -264,22 +266,25 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
     """
     Get portfolio exposure breakdown by sector.
 
-    Returns sector-level exposure data including total exposure value,
-    coverage percentage, and confidence-weighted exposure. Use this to
-    understand the high-level sector allocation of the portfolio.
+    Returns sector-level exposure aggregated from scaled LP exposure. Each sector
+    appears exactly once (deduplicated). Returns top 10 sectors plus an "Other" bucket.
+    Use this to understand the high-level sector allocation of the portfolio.
 
     Args:
-        as_of_date: Optional date filter (YYYY-MM-DD). Uses most recent if not provided.
+        as_of_date: Optional date filter (YYYY-MM-DD). Uses per-fund latest if not provided.
         fund_name: Optional fund name to filter (case-insensitive partial match).
                    When provided, returns sector exposure for that specific fund only.
 
     Returns:
         Dictionary with:
-        - as_of_date: The effective date of the snapshot
-        - total_portfolio_value_usd: Total portfolio value
-        - unknown_exposure_pct: Percentage of portfolio that is unclassified
+        - as_of_date: The effective date range of the snapshot
+        - total_portfolio_value_usd: Total Northbridge LP scaled exposure
+        - classified_exposure_usd: Exposure with known sector classification
+        - unclassified_exposure_usd: Exposure with no sector classification
+        - unclassified_pct: % of total that is unclassified
+        - coverage_pct: % of total that is classified
         - fund_name_filter: The fund filter applied (if any)
-        - sectors: List of sectors with exposure details
+        - sectors: Top 10 sectors plus "Other" bucket, each with pct_of_classified and pct_of_total
     """
     root = _repo_root()
     gold = root / "data" / "gold"
@@ -295,97 +300,153 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
         if holdings.empty:
             return {"error": f"No holdings data for fund '{fund_name}'", "sectors": [], "fund_name_filter": fund_name}
 
-        # Aggregate by GICS sector
-        sector_agg = holdings.groupby("gics_sector_name").agg({
-            "reported_value_usd": "sum",
-            "confidence": "mean",
-        }).reset_index()
-        sector_agg.columns = ["gics_sector_name", "total_exposure_value_usd", "avg_confidence"]
+        # Deduplicate: group by sector and sum
+        sector_agg = holdings.groupby("gics_sector_name").agg(
+            total_exposure_value_usd=("reported_value_usd", "sum"),
+            avg_confidence=("confidence", "mean"),
+        ).reset_index()
 
         total_exposure = sector_agg["total_exposure_value_usd"].sum()
-        unknown_row = sector_agg[sector_agg["gics_sector_name"] == "Unknown"]
-        unknown_exposure = unknown_row["total_exposure_value_usd"].sum() if not unknown_row.empty else 0.0
-        unknown_pct = (unknown_exposure / total_exposure * 100) if total_exposure > 0 else 0.0
-        known_exposure = total_exposure - unknown_exposure
-        coverage_pct = (known_exposure / total_exposure) if total_exposure > 0 else 0.0
+        unclassified = sector_agg[sector_agg["gics_sector_name"] == "Unknown"]
+        unclassified_exposure = unclassified["total_exposure_value_usd"].sum() if not unclassified.empty else 0.0
+        classified_exposure = total_exposure - unclassified_exposure
+        unclassified_pct = (unclassified_exposure / total_exposure * 100) if total_exposure > 0 else 0.0
 
-        # Build sector list (excluding Unknown)
-        known_sectors = sector_agg[sector_agg["gics_sector_name"] != "Unknown"]
+        # Sort classified sectors, take top 10, bucket rest as Other
+        classified = sector_agg[sector_agg["gics_sector_name"] != "Unknown"].sort_values(
+            "total_exposure_value_usd", ascending=False
+        )
+        top_10 = classified.head(10)
+        other_exposure = classified.iloc[10:]["total_exposure_value_usd"].sum()
+
         sectors = []
-        for _, row in known_sectors.iterrows():
+        for _, row in top_10.iterrows():
+            exp = float(row["total_exposure_value_usd"])
             sectors.append({
                 "sector_name": str(row["gics_sector_name"]),
-                "total_exposure_value_usd": float(row["total_exposure_value_usd"]),
-                "exposure_pct": float(row["total_exposure_value_usd"] / total_exposure * 100) if total_exposure > 0 else 0.0,
+                "total_exposure_value_usd": exp,
+                "pct_of_classified": float(exp / classified_exposure * 100) if classified_exposure > 0 else 0.0,
+                "pct_of_total": float(exp / total_exposure * 100) if total_exposure > 0 else 0.0,
                 "avg_confidence": float(row["avg_confidence"]),
             })
-
-        # Sort by exposure value descending
-        sectors.sort(key=lambda x: x["total_exposure_value_usd"], reverse=True)
+        if other_exposure > 0:
+            sectors.append({
+                "sector_name": "Other",
+                "total_exposure_value_usd": float(other_exposure),
+                "pct_of_classified": float(other_exposure / classified_exposure * 100) if classified_exposure > 0 else 0.0,
+                "pct_of_total": float(other_exposure / total_exposure * 100) if total_exposure > 0 else 0.0,
+                "avg_confidence": None,
+            })
 
         return {
             "as_of_date": as_of_date,
             "total_portfolio_value_usd": float(total_exposure),
-            "coverage_pct": float(coverage_pct * 100),
-            "unknown_exposure_pct": float(unknown_pct),
+            "classified_exposure_usd": float(classified_exposure),
+            "unclassified_exposure_usd": float(unclassified_exposure),
+            "unclassified_pct": float(unclassified_pct),
+            "coverage_pct": float(100 - unclassified_pct),
             "fund_name_filter": matched_fund_name,
             "sector_count": len(sectors),
             "sectors": sectors,
         }
 
-    # No fund filter - use pre-aggregated data
-    agg = _read_table(gold / "fact_aggregation_snapshot.csv")
+    # No fund filter — use fact_lp_scaled_exposure with per-fund latest date
+    lp_scaled = _read_table(gold / "fact_lp_scaled_exposure.csv")
+    classifications = _read_table(gold / "fact_exposure_classification.csv")
 
-    if agg.empty:
-        return {"error": "No aggregation data available", "sectors": []}
+    if lp_scaled.empty:
+        return {"error": "No exposure data available", "sectors": []}
 
-    # Filter to sector taxonomy type
-    sector_data = agg[agg["taxonomy_type"] == "sector"].copy()
-    if sector_data.empty:
-        return {"error": "No sector data available", "sectors": []}
+    # Filter to Northbridge rows
+    nb_rows = lp_scaled[lp_scaled["lp_name"] == "Northbridge Endowment Fund"]
+    if nb_rows.empty:
+        nb_rows = lp_scaled
 
-    # Filter by date
     if as_of_date:
-        sector_data = sector_data[sector_data["as_of_date"] == as_of_date]
+        nb_filtered = nb_rows[nb_rows["as_of_date"] == as_of_date]
+        date_label = as_of_date
     else:
-        # Use most recent date
-        as_of_date = sector_data["as_of_date"].max()
-        sector_data = sector_data[sector_data["as_of_date"] == as_of_date]
+        # Per-fund latest date (avoids global-max skew)
+        latest_per_fund = nb_rows.groupby("fund_id")["as_of_date"].max().reset_index()
+        latest_per_fund.columns = ["fund_id", "latest_date"]
+        nb_filtered = nb_rows.merge(
+            latest_per_fund,
+            left_on=["fund_id", "as_of_date"],
+            right_on=["fund_id", "latest_date"],
+        ).drop(columns=["latest_date"])
+        min_date = latest_per_fund["latest_date"].min()
+        max_date = latest_per_fund["latest_date"].max()
+        date_label = str(min_date) if min_date == max_date else f"{min_date} to {max_date}"
 
-    if sector_data.empty:
-        return {"error": f"No sector data for date {as_of_date}", "sectors": []}
+    if nb_filtered.empty:
+        return {"error": f"No exposure data for date {as_of_date}", "sectors": []}
 
-    # Calculate totals
-    total_exposure = sector_data["total_exposure_value_usd"].sum()
-    unknown_row = sector_data[sector_data["taxonomy_node_id"] == UNKNOWN_TAXONOMY_NODE_ID]
-    unknown_exposure = unknown_row["total_exposure_value_usd"].sum() if not unknown_row.empty else 0.0
-    unknown_pct = (unknown_exposure / total_exposure * 100) if total_exposure > 0 else 0.0
+    # Build sector name lookup per company_id from classifications
+    sector_by_company: dict = {}
+    if not classifications.empty:
+        sector_class = classifications[classifications["taxonomy_type"] == "sector"][
+            ["company_id", "taxonomy_node_id"]
+        ].copy()
+        sector_class["company_id"] = sector_class["company_id"].astype(str)
+        for _, row in sector_class.iterrows():
+            node_id = str(row["taxonomy_node_id"])
+            if node_id == UNKNOWN_TAXONOMY_NODE_ID:
+                continue
+            node_info = taxonomy_lookup["node_by_id"].get(node_id, {})
+            name = node_info.get("node_name", "")
+            if name:
+                sector_by_company[str(row["company_id"])] = name
 
-    # Get coverage_pct (should be same for all rows in a taxonomy_type)
-    coverage_pct = sector_data["coverage_pct"].iloc[0] if not sector_data.empty else 0.0
+    # Map each scaled exposure row to its sector name
+    nb_filtered = nb_filtered.copy()
+    nb_filtered["company_id"] = nb_filtered["company_id"].astype(str)
+    nb_filtered["sector_name"] = nb_filtered["company_id"].map(sector_by_company).fillna("Unclassified")
 
-    # Build sector list (excluding unknown)
-    known_sectors = sector_data[sector_data["taxonomy_node_id"] != UNKNOWN_TAXONOMY_NODE_ID]
+    # Deduplicate: GROUP BY sector and SUM scaled_value_usd
+    sector_agg = (
+        nb_filtered.groupby("sector_name")["scaled_value_usd"]
+        .sum()
+        .reset_index()
+        .rename(columns={"scaled_value_usd": "total_exposure_value_usd"})
+    )
+
+    total_exposure = sector_agg["total_exposure_value_usd"].sum()
+    unclassified = sector_agg[sector_agg["sector_name"] == "Unclassified"]
+    unclassified_exposure = unclassified["total_exposure_value_usd"].sum() if not unclassified.empty else 0.0
+    classified_exposure = total_exposure - unclassified_exposure
+    unclassified_pct = (unclassified_exposure / total_exposure * 100) if total_exposure > 0 else 0.0
+
+    # Sort classified sectors, top 10 + Other bucket
+    classified = sector_agg[sector_agg["sector_name"] != "Unclassified"].sort_values(
+        "total_exposure_value_usd", ascending=False
+    )
+    top_10 = classified.head(10)
+    other_exposure = classified.iloc[10:]["total_exposure_value_usd"].sum()
+
     sectors = []
-    for _, row in known_sectors.iterrows():
-        node_id = str(row["taxonomy_node_id"])
-        node_info = taxonomy_lookup["node_by_id"].get(node_id, {})
+    for _, row in top_10.iterrows():
+        exp = float(row["total_exposure_value_usd"])
         sectors.append({
-            "sector_name": node_info.get("node_name", "Unknown"),
-            "taxonomy_node_id": node_id,
-            "total_exposure_value_usd": float(row["total_exposure_value_usd"]),
-            "exposure_pct": float(row["total_exposure_value_usd"] / total_exposure * 100) if total_exposure > 0 else 0.0,
-            "confidence_weighted_exposure": float(row["confidence_weighted_exposure"]),
+            "sector_name": str(row["sector_name"]),
+            "total_exposure_value_usd": exp,
+            "pct_of_classified": float(exp / classified_exposure * 100) if classified_exposure > 0 else 0.0,
+            "pct_of_total": float(exp / total_exposure * 100) if total_exposure > 0 else 0.0,
+        })
+    if other_exposure > 0:
+        sectors.append({
+            "sector_name": "Other",
+            "total_exposure_value_usd": float(other_exposure),
+            "pct_of_classified": float(other_exposure / classified_exposure * 100) if classified_exposure > 0 else 0.0,
+            "pct_of_total": float(other_exposure / total_exposure * 100) if total_exposure > 0 else 0.0,
         })
 
-    # Sort by exposure value descending
-    sectors.sort(key=lambda x: x["total_exposure_value_usd"], reverse=True)
-
     return {
-        "as_of_date": as_of_date,
+        "as_of_date": date_label,
         "total_portfolio_value_usd": float(total_exposure),
-        "coverage_pct": float(coverage_pct * 100),
-        "unknown_exposure_pct": float(unknown_pct),
+        "classified_exposure_usd": float(classified_exposure),
+        "unclassified_exposure_usd": float(unclassified_exposure),
+        "unclassified_pct": float(unclassified_pct),
+        "coverage_pct": float(100 - unclassified_pct),
         "fund_name_filter": None,
         "sector_count": len(sectors),
         "sectors": sectors,
@@ -739,45 +800,63 @@ def get_fund_exposure(fund_name: Optional[str] = None) -> dict:
 
 def get_company_exposure(company_name: Optional[str] = None, top_n: int = 20, fund_name: Optional[str] = None) -> dict:
     """
-    Get portfolio exposure breakdown by company.
+    Get portfolio exposure breakdown by company using Northbridge LP scaled values.
 
-    Returns the top N companies by exposure value, with classification
-    confidence scores when available. Use this to understand concentration
-    in individual holdings.
+    Returns the top companies by scaled exposure value (capped at 20), with
+    classification confidence scores when available. Use this to understand
+    concentration in individual holdings.
 
     Args:
         company_name: Optional company name to search (case-insensitive partial match).
-        top_n: Number of top companies to return (default 20).
+        top_n: Number of top companies to return (default 20, max 20).
         fund_name: Optional fund name to filter (case-insensitive partial match).
                    When provided, returns company exposure for that specific fund only.
 
     Returns:
         Dictionary with:
-        - total_exposure_usd: Total exposure in returned companies
+        - total_exposure_usd: Total scaled exposure in returned companies
         - company_count: Number of companies returned
         - fund_name_filter: The fund filter applied (if any)
-        - companies: List of companies with exposure and confidence details
+        - companies: List of companies with scaled exposure and confidence details
     """
     root = _repo_root()
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    exposures = _read_table(gold / "fact_inferred_exposure.csv")
+    lp_scaled = _read_table(gold / "fact_lp_scaled_exposure.csv")
     companies = _read_table(silver / "dim_company.csv")
     funds = _read_table(silver / "dim_fund.csv")
     classifications = _read_table(gold / "fact_exposure_classification.csv")
 
-    if exposures.empty:
+    if lp_scaled.empty:
         return {"error": "No exposure data available", "companies": [], "fund_name_filter": fund_name}
 
-    # Filter by fund if provided
-    if fund_name:
-        exposures = _filter_exposures_by_fund(exposures, funds, fund_name)
-        if exposures.empty:
-            return {"error": f"No exposure data for fund '{fund_name}'", "companies": [], "fund_name_filter": fund_name}
+    # Filter to Northbridge rows with per-fund latest date
+    nb_rows = lp_scaled[lp_scaled["lp_name"] == "Northbridge Endowment Fund"]
+    if nb_rows.empty:
+        nb_rows = lp_scaled
 
-    # Build company lookup
-    company_lookup = {}
+    latest_per_fund = nb_rows.groupby("fund_id")["as_of_date"].max().reset_index()
+    latest_per_fund.columns = ["fund_id", "latest_date"]
+    nb_filtered = nb_rows.merge(
+        latest_per_fund,
+        left_on=["fund_id", "as_of_date"],
+        right_on=["fund_id", "latest_date"],
+    ).drop(columns=["latest_date"])
+
+    # Filter by fund if provided
+    if fund_name and not funds.empty:
+        matching_funds = funds[funds["fund_name"].str.lower().str.contains(fund_name.lower(), na=False)]
+        if matching_funds.empty:
+            return {"error": f"No exposure data for fund '{fund_name}'", "companies": [], "fund_name_filter": fund_name}
+        matching_fund_ids = set(matching_funds["fund_id"].astype(str).tolist())
+        nb_filtered = nb_filtered[nb_filtered["fund_id"].astype(str).isin(matching_fund_ids)]
+        if nb_filtered.empty:
+            return {"error": f"No exposure data for fund '{fund_name}'", "companies": [], "fund_name_filter": fund_name}
+        fund_name = matching_funds["fund_name"].iloc[0]
+
+    # Build company name lookup from dim_company
+    company_lookup: dict = {}
     if not companies.empty:
         for _, row in companies.iterrows():
             company_lookup[str(row["company_id"])] = {
@@ -788,46 +867,52 @@ def get_company_exposure(company_name: Optional[str] = None, top_n: int = 20, fu
             }
 
     # Build classification confidence lookup
-    confidence_lookup = {}
+    confidence_lookup: dict = {}
     if not classifications.empty:
-        # Get industry classification confidence per company
         industry_class = classifications[classifications["taxonomy_type"] == "industry"]
         for _, row in industry_class.iterrows():
-            company_id = str(row["company_id"]) if pd.notna(row.get("company_id")) else None
-            if company_id:
-                confidence_lookup[company_id] = float(row.get("confidence", 0.0))
+            cid = str(row["company_id"]) if pd.notna(row.get("company_id")) else None
+            if cid:
+                confidence_lookup[cid] = float(row.get("confidence", 0.0))
 
-    # Aggregate by company
-    company_agg = exposures.groupby(["company_id", "raw_company_name"]).agg({
-        "exposure_value_usd": "sum",
-        "fund_id": "nunique",  # Number of funds holding this company
-    }).reset_index()
-    company_agg.columns = ["company_id", "raw_company_name", "total_exposure", "fund_count"]
+    # Aggregate by company_id, summing scaled_value_usd across funds
+    nb_filtered = nb_filtered.copy()
+    nb_filtered["company_id"] = nb_filtered["company_id"].astype(str)
 
-    # Apply company name filter if provided
+    company_agg = (
+        nb_filtered.groupby("company_id")
+        .agg(
+            total_exposure=("scaled_value_usd", "sum"),
+            fund_count=("fund_id", "nunique"),
+        )
+        .reset_index()
+    )
+
+    # Apply company name filter using dim_company names
     if company_name:
-        mask = company_agg["raw_company_name"].str.lower().str.contains(company_name.lower(), na=False)
-        company_agg = company_agg[mask]
+        def _matches(cid: str) -> bool:
+            name = company_lookup.get(cid, {}).get("company_name", "")
+            return company_name.lower() in name.lower()
+        company_agg = company_agg[company_agg["company_id"].apply(_matches)]
 
-    # Sort by exposure and take top N
-    company_agg = company_agg.sort_values("total_exposure", ascending=False).head(top_n)
+    # Sort and cap at max 20
+    cap = min(top_n, 20)
+    company_agg = company_agg.sort_values("total_exposure", ascending=False).head(cap)
 
     total_exposure = company_agg["total_exposure"].sum()
 
-    # Build company list
     company_list = []
     for _, row in company_agg.iterrows():
-        company_id = str(row["company_id"]) if pd.notna(row["company_id"]) else None
-        company_info = company_lookup.get(company_id, {}) if company_id else {}
-        confidence = confidence_lookup.get(company_id) if company_id else None
+        cid = str(row["company_id"])
+        info = company_lookup.get(cid, {})
+        confidence = confidence_lookup.get(cid)
 
         company_list.append({
-            "company_id": company_id,
-            "company_name": company_info.get("company_name") or str(row["raw_company_name"]),
-            "raw_company_name": str(row["raw_company_name"]),
-            "primary_sector": company_info.get("primary_sector"),
-            "primary_industry": company_info.get("primary_industry"),
-            "primary_country": company_info.get("primary_country"),
+            "company_id": cid,
+            "company_name": info.get("company_name") or cid,
+            "primary_sector": info.get("primary_sector"),
+            "primary_industry": info.get("primary_industry"),
+            "primary_country": info.get("primary_country"),
             "total_exposure_value_usd": float(row["total_exposure"]),
             "fund_count": int(row["fund_count"]),
             "classification_confidence": confidence,
@@ -838,7 +923,7 @@ def get_company_exposure(company_name: Optional[str] = None, top_n: int = 20, fu
         "company_count": len(company_list),
         "company_name_filter": company_name,
         "fund_name_filter": fund_name,
-        "top_n": top_n,
+        "top_n": cap,
         "companies": company_list,
     }
 
@@ -937,31 +1022,50 @@ def get_portfolio_summary(as_of_date: Optional[str] = None) -> dict:
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
 
-    exposures = _read_table(gold / "fact_inferred_exposure.csv")
+    lp_scaled = _read_table(gold / "fact_lp_scaled_exposure.csv")
     agg = _read_table(gold / "fact_aggregation_snapshot.csv")
     queue = _read_table(gold / "fact_review_queue_item.csv")
     classifications = _read_table(gold / "fact_exposure_classification.csv")
     taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
 
-    if exposures.empty:
+    if lp_scaled.empty:
         return {"error": "No exposure data available"}
 
-    # Determine as_of_date
-    if as_of_date:
-        exposures_filtered = exposures[exposures["as_of_date"] == as_of_date]
-    else:
-        as_of_date = exposures["as_of_date"].max()
-        exposures_filtered = exposures[exposures["as_of_date"] == as_of_date]
+    # Filter to Northbridge LP rows only
+    nb_rows = lp_scaled[lp_scaled["lp_name"] == "Northbridge Endowment Fund"]
+    if nb_rows.empty:
+        nb_rows = lp_scaled  # fallback: use all rows if lp_name not populated
 
-    if exposures_filtered.empty:
+    if as_of_date:
+        # Caller requested a specific date — filter all funds to that date
+        nb_filtered = nb_rows[nb_rows["as_of_date"] == as_of_date]
+        date_range = as_of_date
+    else:
+        # Use each fund's own latest as_of_date (avoids global-max skew where
+        # only 3 of 12 funds have data at 2025-12-31, producing ~$91M instead of $713M)
+        latest_per_fund = (
+            nb_rows.groupby("fund_id")["as_of_date"].max().reset_index()
+        )
+        latest_per_fund.columns = ["fund_id", "latest_date"]
+        nb_filtered = nb_rows.merge(
+            latest_per_fund,
+            left_on=["fund_id", "as_of_date"],
+            right_on=["fund_id", "latest_date"],
+        ).drop(columns=["latest_date"])
+        min_date = latest_per_fund["latest_date"].min()
+        max_date = latest_per_fund["latest_date"].max()
+        as_of_date = max_date  # report the most-recent date for context
+        date_range = min_date if min_date == max_date else f"{min_date} to {max_date}"
+
+    if nb_filtered.empty:
         return {"error": f"No exposure data for date {as_of_date}"}
 
-    # Basic counts
-    total_value = exposures_filtered["exposure_value_usd"].sum()
-    fund_count = exposures_filtered["fund_id"].nunique()
-    company_count = exposures_filtered["company_id"].nunique()
+    # Basic counts — total value is Northbridge's scaled LP exposure
+    total_value = nb_filtered["scaled_value_usd"].sum()
+    fund_count = nb_filtered["fund_id"].nunique()
+    company_count = nb_filtered["company_id"].nunique() if "company_id" in nb_filtered.columns else 0
 
-    # Coverage from aggregation snapshot
+    # Coverage from aggregation snapshot (use overall latest date for this cross-fund table)
     coverage_pct = 0.0
     if not agg.empty:
         sector_data = agg[(agg["taxonomy_type"] == "sector") & (agg["as_of_date"] == as_of_date)]
@@ -998,7 +1102,7 @@ def get_portfolio_summary(as_of_date: Optional[str] = None) -> dict:
             })
 
     return {
-        "as_of_date": as_of_date,
+        "as_of_date": date_range,
         "total_portfolio_value_usd": float(total_value),
         "fund_count": int(fund_count),
         "company_count": int(company_count),
@@ -1102,6 +1206,90 @@ def get_confidence_distribution(taxonomy_type: str = "sector") -> dict:
     }
 
 
+def get_portfolio_health() -> dict:
+    """
+    Get a one-time data quality summary for the portfolio.
+
+    Returns a clean snapshot of classification coverage, unclassified exposure,
+    review queue size, and data sources. Use this tool when asked about data
+    quality, coverage, or completeness — do not inject these warnings into
+    other responses.
+
+    Returns:
+        Dictionary with:
+        - classification_coverage_pct: % of portfolio with known sector classification
+        - classified_exposure_usd: Classified exposure in USD
+        - unclassified_exposure_usd: Unclassified exposure in USD
+        - unclassified_pct: % of portfolio that is unclassified
+        - unclassified_note: Plain-language explanation of why
+        - review_queue_count: Total pending review items
+        - data_sources: List of sources with holding counts
+        - total_portfolio_value_usd: Total Northbridge LP scaled exposure
+    """
+    root = _repo_root()
+    gold = root / "data" / "gold"
+
+    lp_scaled = _read_table(gold / "fact_lp_scaled_exposure.csv")
+    queue = _read_table(gold / "fact_review_queue_item.csv")
+
+    if lp_scaled.empty:
+        return {"error": "No exposure data available"}
+
+    # Filter to Northbridge with per-fund latest date
+    nb_rows = lp_scaled[lp_scaled["lp_name"] == "Northbridge Endowment Fund"]
+    if nb_rows.empty:
+        nb_rows = lp_scaled
+
+    latest_per_fund = nb_rows.groupby("fund_id")["as_of_date"].max().reset_index()
+    latest_per_fund.columns = ["fund_id", "latest_date"]
+    nb_filtered = nb_rows.merge(
+        latest_per_fund,
+        left_on=["fund_id", "as_of_date"],
+        right_on=["fund_id", "latest_date"],
+    ).drop(columns=["latest_date"])
+
+    total_value = float(nb_filtered["scaled_value_usd"].sum())
+
+    # Classified = rows with a non-null company_id
+    has_company = nb_filtered["company_id"].notna() & (nb_filtered["company_id"].astype(str) != "nan")
+    classified_exposure = float(nb_filtered.loc[has_company, "scaled_value_usd"].sum())
+    unclassified_exposure = total_value - classified_exposure
+    coverage_pct = (classified_exposure / total_value * 100) if total_value > 0 else 0.0
+
+    # Review queue total
+    review_queue_count = 0
+    if not queue.empty:
+        review_queue_count = int((queue["status"] == "pending").sum())
+
+    # Data sources breakdown
+    data_sources = []
+    if "source" in nb_filtered.columns:
+        source_counts = nb_filtered.groupby("source").agg(
+            holding_count=("scaled_exposure_id", "count"),
+            total_scaled_usd=("scaled_value_usd", "sum"),
+        ).reset_index()
+        for _, row in source_counts.iterrows():
+            data_sources.append({
+                "source": str(row["source"]),
+                "holding_count": int(row["holding_count"]),
+                "total_scaled_usd": float(row["total_scaled_usd"]),
+            })
+
+    return {
+        "total_portfolio_value_usd": total_value,
+        "classification_coverage_pct": round(coverage_pct, 1),
+        "classified_exposure_usd": classified_exposure,
+        "unclassified_exposure_usd": unclassified_exposure,
+        "unclassified_pct": round(100 - coverage_pct, 1),
+        "unclassified_note": (
+            "Unclassified holdings are primarily BDC borrowers with opaque holding company "
+            "names. This is normal for private credit portfolios."
+        ),
+        "review_queue_count": review_queue_count,
+        "data_sources": data_sources,
+    }
+
+
 # ============================================================================
 # TOOLS_REGISTRY
 # ============================================================================
@@ -1158,5 +1346,10 @@ TOOLS_REGISTRY: list[dict] = [
         "name": "get_confidence_distribution",
         "function": get_confidence_distribution,
         "description": _get_docstring(get_confidence_distribution),
+    },
+    {
+        "name": "get_portfolio_health",
+        "function": get_portfolio_health,
+        "description": _get_docstring(get_portfolio_health),
     },
 ]

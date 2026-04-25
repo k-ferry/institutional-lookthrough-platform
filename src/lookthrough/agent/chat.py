@@ -10,6 +10,7 @@ The agent follows the AI Contract (docs/ai_contract.md):
 """
 from __future__ import annotations
 
+import datetime
 import inspect
 import json
 import logging
@@ -23,35 +24,89 @@ logger = logging.getLogger(__name__)
 # SYSTEM PROMPT
 # ============================================================================
 
-SYSTEM_PROMPT = """You are an institutional portfolio exposure analyst assistant.
+def _get_as_of_date_range() -> str:
+    """Return per-fund latest as_of_date range from fact_lp_scaled_exposure (e.g. '2024-12-31 to 2025-12-31')."""
+    try:
+        from src.lookthrough.db.repository import _is_csv_mode, get_all
+        from src.lookthrough.db.models import FactLpScaledExposure
+        from pathlib import Path
+        import pandas as pd
+
+        if _is_csv_mode():
+            path = Path(__file__).resolve().parents[4] / "data" / "gold" / "fact_lp_scaled_exposure.csv"
+            if path.exists():
+                df = pd.read_csv(path)
+            else:
+                return "unknown"
+        else:
+            df = get_all(FactLpScaledExposure)
+
+        if df.empty or "as_of_date" not in df.columns:
+            return "unknown"
+
+        nb = df[df["lp_name"] == "Northbridge Endowment Fund"]
+        if nb.empty:
+            nb = df
+        latest_per_fund = nb.groupby("fund_id")["as_of_date"].max()
+        min_date = latest_per_fund.min()
+        max_date = latest_per_fund.max()
+        return str(min_date) if min_date == max_date else f"{min_date} to {max_date}"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def build_system_prompt() -> str:
+    """Build the system prompt with dynamic date grounding."""
+    today = datetime.date.today().isoformat()
+    date_range = _get_as_of_date_range()
+
+    return f"""You are the AI assistant for Northbridge Endowment Fund. The portfolio
+represents Northbridge's LP positions scaled to their ownership stake in each fund.
+Total current portfolio exposure is approximately $713M across 12 funds. All exposure
+figures shown are Northbridge's proportional exposure, not the full fund values.
+
+Today's date is {today}. Portfolio data spans multiple reporting dates (latest per fund,
+ranging from {date_range}). When reporting total exposure use all funds at their latest
+available date = $713M total. Never reference dates beyond {date_range.split(' to ')[-1]}.
+When asked about current exposure, use the latest available data.
 
 Your role is to help users understand their portfolio's look-through exposures,
 including sector, industry, geography, fund-level, and company-level breakdowns.
 
-Key principles:
-1. Always surface uncertainty and confidence levels in your answers. Never present
-   low-confidence data as certain. When data has low confidence or coverage gaps,
-   explicitly mention it (e.g., "Note: 15% of the portfolio has unclassified sector
-   exposure" or "Classification confidence for Healthcare is only 65%").
+Portfolio data quality context:
+The portfolio has 83% classification coverage. The unclassified 17% are primarily BDC
+borrowers with opaque holding company names — this is normal for private credit portfolios.
+Do not repeatedly warn about data quality in every response. Mention coverage once briefly
+if asked, or if coverage is below 85%, then move on.
 
-2. Use the provided tools to query portfolio data BEFORE answering questions.
+Key principles:
+1. Always use the provided tools to query portfolio data BEFORE answering questions.
    Do not guess or fabricate holdings, exposure values, or percentages.
 
-3. For analytical questions about risks, market context, or investment implications,
+2. Never show duplicate sector entries. Aggregate all positions by sector before reporting.
+
+3. Always report exposure in millions (e.g. $713.3M not $713,300,000).
+
+4. When asked about sector exposure, show top 5 sectors with $ amount and % of classified
+   portfolio. Do not list individual holdings unless specifically asked.
+
+5. Keep responses concise and professional — 3-5 sentences for simple queries, a structured
+   list for complex ones. No lengthy disclaimers.
+
+6. For analytical questions about risks, market context, or investment implications,
    clearly label your analysis as AI-generated insight separate from portfolio facts.
    Use phrases like "Based on the data, my analysis suggests..." or "From an analytical
    perspective..."
 
-4. When presenting numbers, be precise but readable. Use appropriate units (USD, %),
-   round sensibly, and format large numbers (e.g., $1.2M instead of $1,234,567).
-
-5. If a question cannot be answered with the available tools or data, say so clearly
+7. If a question cannot be answered with the available tools or data, say so clearly
    rather than speculating.
 
 Available capabilities:
 - Portfolio summary and high-level metrics
 - Sector, industry, and geography exposure breakdowns
 - Fund-level and company-level exposure details
+- Portfolio health and data quality summary (use get_portfolio_health for data quality questions)
 - Review queue items requiring attention
 - Confidence distribution analysis
 """
@@ -261,11 +316,13 @@ async def chat_with_claude(
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": message})
 
+    system_prompt = build_system_prompt()
+
     # Initial request
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         tools=tools,
         messages=messages,
     )
@@ -301,7 +358,7 @@ async def chat_with_claude(
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             tools=tools,
             messages=messages,
         )
@@ -350,7 +407,7 @@ async def chat_with_openai(
     tools_used = []
 
     # Build messages list with system prompt
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": build_system_prompt()}]
     if conversation_history:
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": message})
@@ -433,7 +490,7 @@ async def chat_with_ollama(
     tools_used = []
 
     # Build messages list with system prompt
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": build_system_prompt()}]
     if conversation_history:
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": message})

@@ -284,33 +284,27 @@ def get_filter_options(
     )
     funds = [{"id": r.fund_id, "name": r.fund_name, "source": r.fund_source} for r in fund_rows]
 
-    # Distinct coalesced sectors
+    # Distinct GICS sectors from dim_company only (excludes raw BDC reported_sector strings)
     sector_rows = (
-        db.query(sector_col.label("sector"))
-        .select_from(FactReportedHolding)
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        db.query(DimCompany.primary_sector)
+        .filter(DimCompany.primary_sector.isnot(None))
         .distinct()
-        .order_by(sector_col)
+        .order_by(DimCompany.primary_sector)
         .all()
     )
-    sectors = [r.sector for r in sector_rows if r.sector]
+    sectors = [r.primary_sector for r in sector_rows]
 
-    # Distinct industries with parent sector (for cascade filtering)
+    # Distinct GICS industries with parent sector from dim_company only
     industry_rows = (
-        db.query(
-            industry_col.label("industry"),
-            sector_col.label("sector"),
-        )
-        .select_from(FactReportedHolding)
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        db.query(DimCompany.primary_industry, DimCompany.primary_sector)
+        .filter(DimCompany.primary_industry.isnot(None))
         .distinct()
-        .order_by(industry_col)
+        .order_by(DimCompany.primary_industry)
         .all()
     )
     industries = [
-        {"name": r.industry, "sector": r.sector}
+        {"name": r.primary_industry, "sector": r.primary_sector}
         for r in industry_rows
-        if r.industry
     ]
 
     # Distinct countries

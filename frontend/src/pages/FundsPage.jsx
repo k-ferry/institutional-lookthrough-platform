@@ -42,19 +42,51 @@ async function fetchJSON(url) {
 // Fund type display
 // ---------------------------------------------------------------------------
 
+// Canonical keys and their display metadata
 const FUND_TYPE_META = {
-  pe:        { label: 'Private Equity',  short: 'PE',      badgeClasses: 'bg-blue-900 text-white',      color: '#1e3a8a' },
-  vc:        { label: 'Venture Capital', short: 'VC',      badgeClasses: 'bg-blue-600 text-white',      color: '#2563eb' },
-  hedge:     { label: 'Hedge Fund',      short: 'Hedge',   badgeClasses: 'bg-purple-700 text-white',    color: '#7e22ce' },
-  credit:    { label: 'Credit',          short: 'Credit',  badgeClasses: 'bg-teal-600 text-white',      color: '#0d9488' },
-  bdc:       { label: 'BDC',             short: 'BDC',     badgeClasses: 'bg-emerald-600 text-white',   color: '#059669' },
-  etf:       { label: 'ETF / Mutual',    short: 'ETF',     badgeClasses: 'bg-sky-200 text-sky-900',     color: '#38bdf8' },
-  synthetic: { label: 'Synthetic',       short: 'Synthetic', badgeClasses: 'bg-gray-400 text-white',   color: '#9ca3af' },
+  private_equity:  { label: 'Private Equity',  short: 'PE',     badgeClasses: 'bg-[#1E2761] text-white',  color: '#1E2761' },
+  venture_capital: { label: 'Venture Capital', short: 'VC',     badgeClasses: 'bg-[#3B5FC0] text-white',  color: '#3B5FC0' },
+  hedge_fund:      { label: 'Hedge Fund',      short: 'Hedge',  badgeClasses: 'bg-[#5B2D8E] text-white',  color: '#5B2D8E' },
+  private_credit:  { label: 'Private Credit',  short: 'Credit', badgeClasses: 'bg-[#0D7377] text-white',  color: '#0D7377' },
+  bdc:             { label: 'BDC',             short: 'BDC',    badgeClasses: 'bg-[#0891B2] text-white',  color: '#0891B2' },
+  etf:             { label: 'ETF',             short: 'ETF',    badgeClasses: 'bg-[#4A90D9] text-white',  color: '#4A90D9' },
+  mutual_fund:     { label: 'Mutual Fund',     short: 'Mutual', badgeClasses: 'bg-[#6B7280] text-white',  color: '#6B7280' },
+  public:          { label: 'Public',          short: 'Public', badgeClasses: 'bg-[#10B981] text-white',  color: '#10B981' },
+  unknown:         { label: 'Other',           short: '—',      badgeClasses: 'bg-[#9CA3AF] text-white',  color: '#9CA3AF' },
+}
+
+// Maps every expected API variant (lowercased) → canonical key
+const FUND_TYPE_NORMALIZE = {
+  private_equity:  'private_equity',
+  'private equity': 'private_equity',
+  pe:              'private_equity',
+  venture_capital: 'venture_capital',
+  'venture capital': 'venture_capital',
+  vc:              'venture_capital',
+  hedge_fund:      'hedge_fund',
+  'hedge fund':    'hedge_fund',
+  hedge:           'hedge_fund',
+  private_credit:  'private_credit',
+  'private credit': 'private_credit',
+  credit:          'private_credit',
+  bdc:             'bdc',
+  etf:             'etf',
+  'etf / mutual':  'etf',
+  mutual_fund:     'mutual_fund',
+  'mutual fund':   'mutual_fund',
+  mutual:          'mutual_fund',
+  public:          'public',
+  synthetic:       'unknown',
+  unknown:         'unknown',
+}
+
+function normalizeFundType(type) {
+  if (!type) return 'unknown'
+  return FUND_TYPE_NORMALIZE[type.toLowerCase().trim()] ?? 'unknown'
 }
 
 function fundTypeMeta(type) {
-  if (!type) return { label: type ?? '—', short: '—', badgeClasses: 'bg-gray-200 text-gray-600', color: '#d1d5db' }
-  return FUND_TYPE_META[type.toLowerCase()] ?? { label: type, short: type, badgeClasses: 'bg-gray-200 text-gray-600', color: '#d1d5db' }
+  return FUND_TYPE_META[normalizeFundType(type)] ?? FUND_TYPE_META.unknown
 }
 
 // Sector chip colors
@@ -87,13 +119,13 @@ function sectorChipClasses(sector) {
 // ---------------------------------------------------------------------------
 
 const TYPE_FILTER_PILLS = [
-  { key: 'all',    label: 'All Funds',       types: null },
-  { key: 'pe',     label: 'Private Equity',  types: ['pe'] },
-  { key: 'vc',     label: 'Venture Capital', types: ['vc'] },
-  { key: 'credit', label: 'Credit',          types: ['credit'] },
-  { key: 'hedge',  label: 'Hedge Fund',      types: ['hedge'] },
-  { key: 'etf',    label: 'ETF & Mutual',    types: ['etf'] },
-  { key: 'bdc',    label: 'BDC',             types: ['bdc'] },
+  { key: 'all',            label: 'All Funds',       types: null },
+  { key: 'private_equity', label: 'Private Equity',  types: ['private_equity'] },
+  { key: 'venture_capital',label: 'Venture Capital', types: ['venture_capital'] },
+  { key: 'private_credit', label: 'Private Credit',  types: ['private_credit'] },
+  { key: 'hedge_fund',     label: 'Hedge Fund',      types: ['hedge_fund'] },
+  { key: 'etf',            label: 'ETF / Mutual',    types: ['etf', 'mutual_fund'] },
+  { key: 'bdc',            label: 'BDC',             types: ['bdc'] },
 ]
 
 // ---------------------------------------------------------------------------
@@ -333,7 +365,7 @@ export default function FundsPage() {
     const q = search.trim().toLowerCase()
 
     return allFunds.filter((f) => {
-      if (allowedTypes && !allowedTypes.includes((f.fund_type ?? '').toLowerCase())) return false
+      if (allowedTypes && !allowedTypes.includes(normalizeFundType(f.fund_type))) return false
       if (q && !f.fund_name.toLowerCase().includes(q)) return false
       return true
     })
@@ -389,7 +421,7 @@ export default function FundsPage() {
         <div className="flex flex-wrap gap-2">
           {TYPE_FILTER_PILLS.map((pill) => {
             const count = pill.types
-              ? allFunds.filter((f) => pill.types.includes((f.fund_type ?? '').toLowerCase())).length
+              ? allFunds.filter((f) => pill.types.includes(normalizeFundType(f.fund_type))).length
               : allFunds.length
             if (count === 0 && pill.key !== 'all') return null
             const isActive = typeFilter === pill.key
