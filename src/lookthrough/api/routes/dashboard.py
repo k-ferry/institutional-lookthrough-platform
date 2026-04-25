@@ -43,17 +43,30 @@ def _latest_per_fund_sq(db: Session):
 
 
 def _scaled_totals_by_fund(db: Session) -> dict[str, float]:
-    """Return {fund_id: sum(scaled_value_usd)} for each fund at its latest as_of_date."""
-    latest_sq = _latest_per_fund_sq(db)
+    """Return {fund_id: sum(scaled_value_usd)} for each fund at its latest as_of_date.
+
+    Inlines the latest-date subquery explicitly so SQLAlchemy generates a clean
+    JOIN with the as_of_date = latest_date condition in the ON clause rather than
+    accumulating totals across all historical quarters.
+    """
+    latest_per_fund = (
+        db.query(
+            FactLpScaledExposure.fund_id.label("fund_id"),
+            func.max(FactLpScaledExposure.as_of_date).label("latest_date"),
+        )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+        .group_by(FactLpScaledExposure.fund_id)
+        .subquery("latest_per_fund")
+    )
     rows = (
         db.query(
             FactLpScaledExposure.fund_id,
             func.sum(FactLpScaledExposure.scaled_value_usd).label("total"),
         )
         .join(
-            latest_sq,
-            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
-            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+            latest_per_fund,
+            (FactLpScaledExposure.fund_id == latest_per_fund.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_per_fund.c.latest_date),
         )
         .filter(FactLpScaledExposure.lp_name == LP_NAME)
         .group_by(FactLpScaledExposure.fund_id)
@@ -1108,8 +1121,9 @@ def get_fund_detail(
             func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
             func.sum(_scaled_val).label("value_usd"),
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .select_from(FactReportedHolding)
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
         .outerjoin(FactLpScaledExposure, FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
         .filter(FactFundReport.fund_id == fund_id)
     )
@@ -1142,8 +1156,9 @@ def get_fund_detail(
             func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
             func.sum(_scaled_val).label("value_usd"),
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .select_from(FactReportedHolding)
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
         .outerjoin(FactLpScaledExposure, FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
         .filter(FactFundReport.fund_id == fund_id)
     )
@@ -1185,8 +1200,9 @@ def get_fund_detail(
             country_col.label("country"),
             func.sum(_scaled_val).label("value_usd"),
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .select_from(FactReportedHolding)
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
         .outerjoin(FactLpScaledExposure, FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
         .filter(FactFundReport.fund_id == fund_id)
     )
@@ -1225,8 +1241,9 @@ def get_fund_detail(
             FactLpScaledExposure.scaled_value_usd,
             FactReportedHolding.as_of_date,
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .select_from(FactReportedHolding)
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
         .outerjoin(FactLpScaledExposure, FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
         .filter(FactFundReport.fund_id == fund_id)
     )
