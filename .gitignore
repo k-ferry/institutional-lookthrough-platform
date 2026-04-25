@@ -209,3 +209,4 @@ __marimo__/
 data/
 repo_snapshot.txt
 .claude/
+lookthrough_backup.sql
