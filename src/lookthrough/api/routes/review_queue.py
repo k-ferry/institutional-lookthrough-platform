@@ -41,6 +41,10 @@ class StatusUpdateRequest(BaseModel):
     ai_suggested_sector: Optional[str] = None
     ai_suggested_industry: Optional[str] = None
     ai_suggested_country: Optional[str] = None
+    # Manual overrides — take priority over ai_suggested when writing to dim_company
+    manual_sector: Optional[str] = None
+    manual_industry: Optional[str] = None
+    manual_country: Optional[str] = None
 
 
 class BulkStatusUpdateRequest(BaseModel):
@@ -571,12 +575,21 @@ def update_queue_item(
     if item is None:
         raise HTTPException(status_code=404, detail="Queue item not found")
 
-    # Persist any AI suggestions passed in this request
-    if body.ai_suggested_sector is not None:
+    # Manual overrides take priority — store them in ai_suggested columns so they
+    # are visible on subsequent fetches (no separate manual_* columns in the schema)
+    if body.manual_sector is not None:
+        item.ai_suggested_sector = body.manual_sector
+    elif body.ai_suggested_sector is not None:
         item.ai_suggested_sector = body.ai_suggested_sector
-    if body.ai_suggested_industry is not None:
+
+    if body.manual_industry is not None:
+        item.ai_suggested_industry = body.manual_industry
+    elif body.ai_suggested_industry is not None:
         item.ai_suggested_industry = body.ai_suggested_industry
-    if body.ai_suggested_country is not None:
+
+    if body.manual_country is not None:
+        item.ai_suggested_country = body.manual_country
+    elif body.ai_suggested_country is not None:
         item.ai_suggested_country = body.ai_suggested_country
 
     item.status = body.status
@@ -594,11 +607,13 @@ def update_queue_item(
             .first()
         )
 
-    # On approve: write AI suggestions back to dim_company and log audit event
+    # On approve: write classification to dim_company. Manual values (already merged into
+    # ai_suggested columns above) take priority over any previously stored ai_suggested values.
     if body.status == "approved" and company is not None:
         sector = item.ai_suggested_sector
         industry = item.ai_suggested_industry
         country = item.ai_suggested_country
+        is_manual = bool(body.manual_sector or body.manual_industry or body.manual_country)
         if sector or industry or country:
             if sector:
                 company.primary_sector = sector
@@ -620,6 +635,7 @@ def update_queue_item(
                     "sector": sector,
                     "industry": industry,
                     "country": country,
+                    "manual_override": is_manual,
                     "approved_by": current_user.email,
                     "queue_item_id": item_id,
                 }),

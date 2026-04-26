@@ -65,9 +65,7 @@ function getColor(country) {
 }
 
 function flagLabel(country) {
-  if (country === 'Unknown') return country
-  const code = COUNTRY_CODES[country]
-  return code ? `${code} · ${country}` : country
+  return country
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   X,
@@ -11,6 +11,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  ChevronDown,
   Info,
   Sparkles,
   Loader2,
@@ -54,6 +55,26 @@ const DEFAULT_FILTERS = {
   page: 1,
   pageSize: 50,
 }
+
+const COUNTRY_OPTIONS = [
+  { value: 'United States', label: 'United States' },
+  { value: 'United Kingdom', label: 'United Kingdom' },
+  { value: 'Germany', label: 'Germany' },
+  { value: 'France', label: 'France' },
+  { value: 'Canada', label: 'Canada' },
+  { value: 'Japan', label: 'Japan' },
+  { value: 'China', label: 'China' },
+  { value: 'Australia', label: 'Australia' },
+  { value: 'Netherlands', label: 'Netherlands' },
+  { value: 'Sweden', label: 'Sweden' },
+  { value: 'Israel', label: 'Israel' },
+  { value: 'Ireland', label: 'Ireland' },
+  { value: 'Luxembourg', label: 'Luxembourg' },
+  { value: 'Denmark', label: 'Denmark' },
+  { value: 'Norway', label: 'Norway' },
+  { value: 'Finland', label: 'Finland' },
+  { value: 'Unknown', label: 'Unknown / Cannot Determine' },
+]
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -249,24 +270,119 @@ function ProviderBadge({ provider }) {
   )
 }
 
+// Searchable combobox — options: array of {value, label}
+function SearchableSelect({ options, value, onChange, placeholder, disabled = false }) {
+  const [query, setQuery] = useState('')
+  const [isOpen, setIsOpen] = useState(false)
+  const containerRef = useRef(null)
+
+  const selectedLabel = options.find((o) => o.value === value)?.label ?? ''
+
+  useEffect(() => {
+    function handleOutside(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setIsOpen(false)
+        setQuery('')
+      }
+    }
+    document.addEventListener('mousedown', handleOutside)
+    return () => document.removeEventListener('mousedown', handleOutside)
+  }, [])
+
+  // Reset query when value is cleared externally (e.g. industry reset on sector change)
+  useEffect(() => {
+    if (!value) setQuery('')
+  }, [value])
+
+  const filtered = useMemo(
+    () =>
+      query ? options.filter((o) => o.label.toLowerCase().includes(query.toLowerCase())) : options,
+    [query, options]
+  )
+
+  function handleSelect(option) {
+    onChange(option.value)
+    setQuery('')
+    setIsOpen(false)
+  }
+
+  const displayValue = isOpen ? query : selectedLabel
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative">
+        <input
+          type="text"
+          value={displayValue}
+          onChange={(e) => { setQuery(e.target.value); setIsOpen(true) }}
+          onFocus={() => setIsOpen(true)}
+          onKeyDown={(e) => { if (e.key === 'Escape') { setIsOpen(false); setQuery('') } }}
+          disabled={disabled}
+          placeholder={placeholder}
+          className="w-full py-1.5 pl-3 pr-7 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:bg-secondary-50 disabled:text-secondary-400 disabled:cursor-not-allowed"
+        />
+        <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-secondary-400 pointer-events-none" />
+      </div>
+      {isOpen && !disabled && filtered.length > 0 && (
+        <ul className="absolute z-50 left-0 right-0 top-full mt-0.5 max-h-48 overflow-y-auto rounded-md border border-secondary-200 bg-white shadow-lg">
+          {filtered.map((option) => (
+            <li
+              key={option.value}
+              onMouseDown={(e) => { e.preventDefault(); handleSelect(option) }}
+              className={`px-3 py-1.5 text-xs cursor-pointer ${
+                option.value === value
+                  ? 'bg-primary-50 text-primary-700 font-medium'
+                  : 'text-secondary-700 hover:bg-secondary-50'
+              }`}
+            >
+              {option.label}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 // Expandable detail panel rendered as a full-width row below the item row
-function DetailPanel({ item, onAction, actionLoading }) {
+function DetailPanel({ item, onAction, actionLoading, filtersData }) {
   const [notes, setNotes] = useState('')
   const [selectedProvider, setSelectedProvider] = useState('claude')
   const [researchLoading, setResearchLoading] = useState(false)
   const [researchResult, setResearchResult] = useState(null)
-  // Classification override — pre-populate from stored suggestions or AI classification
-  const [suggestedSector, setSuggestedSector] = useState(
-    item.ai_suggested_sector ?? item.reported_sector ?? ''
-  )
-  const [suggestedIndustry, setSuggestedIndustry] = useState(
-    item.ai_suggested_industry ?? item.ai_classification?.node_name ?? ''
-  )
-  const [suggestedCountry, setSuggestedCountry] = useState(
-    item.ai_suggested_country ?? ''
-  )
+  const [manualSector, setManualSector] = useState('')
+  const [manualIndustry, setManualIndustry] = useState('')
+  const [manualCountry, setManualCountry] = useState('')
   const ai = item.ai_classification
   const isProcessing = actionLoading === item.queue_item_id
+
+  // Cascade: reset industry when sector changes
+  useEffect(() => {
+    setManualIndustry('')
+  }, [manualSector])
+
+  const sectorOptions = useMemo(
+    () => (filtersData?.sectors ?? []).map((s) => ({ value: s, label: s })),
+    [filtersData?.sectors]
+  )
+  const industryOptions = useMemo(() => {
+    const all = (filtersData?.industries ?? []).map((i) => ({
+      value: i.name,
+      label: i.name,
+      sector: i.sector,
+    }))
+    return manualSector ? all.filter((i) => !i.sector || i.sector === manualSector) : all
+  }, [filtersData?.industries, manualSector])
+
+  const hasClassification = !!(manualSector || manualIndustry || manualCountry)
+
+  function handleSaveClassification() {
+    onAction(item.queue_item_id, 'approved', notes, null, {
+      sector: manualSector,
+      industry: manualIndustry,
+      country: manualCountry,
+    })
+  }
 
   async function handleResearch() {
     setResearchLoading(true)
@@ -507,44 +623,52 @@ function DetailPanel({ item, onAction, actionLoading }) {
         )}
       </div>
 
-      {/* BOTTOM — Classification override + reviewer notes + actions */}
-      <div className="mt-5 pt-4 border-t border-secondary-200 space-y-3">
-        {/* Classification override fields — written to dim_company on Approve */}
+      {/* BOTTOM — Manual classification override + reviewer notes + actions */}
+      <div className="mt-5 pt-4 border-t border-secondary-200 space-y-4">
+
+        {/* Manual classification override — searchable dropdowns written to dim_company on save */}
         <div>
           <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-2">
-            Apply on Approve
-            <span className="ml-1.5 font-normal normal-case text-secondary-400">(written to company record)</span>
+            Manual Classification Override
+            <span className="ml-1.5 font-normal normal-case text-secondary-400">(overrides AI suggestions — written to company record)</span>
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <input
-              type="text"
-              value={suggestedSector}
-              onChange={(e) => setSuggestedSector(e.target.value)}
-              placeholder="Sector (e.g. Financials)"
-              className="py-1.5 px-3 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            <SearchableSelect
+              options={sectorOptions}
+              value={manualSector}
+              onChange={setManualSector}
+              placeholder="Select GICS Sector…"
             />
-            <input
-              type="text"
-              value={suggestedIndustry}
-              onChange={(e) => setSuggestedIndustry(e.target.value)}
-              placeholder="Industry (e.g. Asset Management)"
-              className="py-1.5 px-3 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            <SearchableSelect
+              options={industryOptions}
+              value={manualIndustry}
+              onChange={setManualIndustry}
+              placeholder="Select Industry…"
+              disabled={!manualSector}
             />
-            <input
-              type="text"
-              value={suggestedCountry}
-              onChange={(e) => setSuggestedCountry(e.target.value)}
-              placeholder="Country (e.g. United States)"
-              className="py-1.5 px-3 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            <SearchableSelect
+              options={COUNTRY_OPTIONS}
+              value={manualCountry}
+              onChange={setManualCountry}
+              placeholder="Select Country…"
             />
           </div>
-          {(suggestedSector || suggestedIndustry || suggestedCountry) && (
+          {hasClassification && (
             <p className="text-xs text-green-700 mt-1.5">
-              Approving will write these values to <span className="font-medium">{item.company_name}</span>.
+              Saving will write these values to <span className="font-medium">{item.company_name}</span> and mark as approved.
             </p>
           )}
+          <button
+            onClick={handleSaveClassification}
+            disabled={!hasClassification || isProcessing || item.status === 'approved'}
+            className="mt-3 flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-md hover:bg-primary-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+            Save Manual Classification
+          </button>
         </div>
 
+        {/* Notes + approve / reject / dismiss */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
           <input
             type="text"
@@ -555,12 +679,7 @@ function DetailPanel({ item, onAction, actionLoading }) {
           />
           <div className="flex items-center gap-2 shrink-0">
             <button
-              onClick={() => onAction(
-                item.queue_item_id,
-                'approved',
-                notes,
-                { sector: suggestedSector, industry: suggestedIndustry, country: suggestedCountry },
-              )}
+              onClick={() => onAction(item.queue_item_id, 'approved', notes)}
               disabled={isProcessing || item.status === 'approved'}
               className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
@@ -615,6 +734,12 @@ export default function ReviewQueuePage() {
   const hasActiveFilters =
     filters.status !== 'pending' || filters.priority !== 'all' || filters.reason !== ''
 
+  const { data: filtersData } = useQuery({
+    queryKey: ['holdings-filters'],
+    queryFn: () => fetchJSON('/api/holdings/filters'),
+    staleTime: 5 * 60 * 1000,
+  })
+
   const { data: stats } = useQuery({
     queryKey: ['review-queue-stats'],
     queryFn: () => fetchJSON('/api/review-queue/stats'),
@@ -634,8 +759,8 @@ export default function ReviewQueuePage() {
   const totalPages = Math.max(1, Math.ceil(total / filters.pageSize))
   const allSelected = items.length > 0 && selectedIds.size === items.length
 
-  // notes + aiSuggestions params are passed from the detail panel; inline buttons omit them
-  async function handleAction(itemId, status, notes = null, aiSuggestions = null) {
+  // manualOverrides are sent from "Save Manual Classification" button and take priority over ai_suggested
+  async function handleAction(itemId, status, notes = null, aiSuggestions = null, manualOverrides = null) {
     setActionLoading(itemId)
     setActionError(null)
     try {
@@ -649,6 +774,9 @@ export default function ReviewQueuePage() {
           ...(aiSuggestions?.sector ? { ai_suggested_sector: aiSuggestions.sector } : {}),
           ...(aiSuggestions?.industry ? { ai_suggested_industry: aiSuggestions.industry } : {}),
           ...(aiSuggestions?.country ? { ai_suggested_country: aiSuggestions.country } : {}),
+          ...(manualOverrides?.sector ? { manual_sector: manualOverrides.sector } : {}),
+          ...(manualOverrides?.industry ? { manual_industry: manualOverrides.industry } : {}),
+          ...(manualOverrides?.country ? { manual_country: manualOverrides.country } : {}),
         }),
       })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
@@ -936,7 +1064,9 @@ export default function ReviewQueuePage() {
                           {item.company_name ?? '—'}
                         </span>
                         {item.primary_sector && (
-                          <span className="text-xs text-secondary-400">{item.primary_sector}</span>
+                          <span className="mt-0.5 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                            {item.primary_sector}
+                          </span>
                         )}
                       </td>
                       <td className="py-3 px-3">
@@ -986,6 +1116,7 @@ export default function ReviewQueuePage() {
                             item={item}
                             onAction={handleAction}
                             actionLoading={actionLoading}
+                            filtersData={filtersData}
                           />
                         </td>
                       </tr>
