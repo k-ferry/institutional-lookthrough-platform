@@ -142,27 +142,46 @@ function CoverageRow({ label, value, description }) {
   )
 }
 
-function SourceBreakdownBar({ bdc, synthetic, total }) {
+const SOURCE_CONFIG = {
+  bdc_filing:   { label: 'BDC Filing',   color: 'bg-primary-600',   text: 'text-white' },
+  pdf_document: { label: 'PDF Document', color: 'bg-emerald-600',   text: 'text-white' },
+  '13f_filing': { label: '13F Filing',   color: 'bg-amber-500',     text: 'text-white' },
+  synthetic:    { label: 'Synthetic',    color: 'bg-secondary-300', text: 'text-secondary-700' },
+}
+
+function SourceBreakdownBar({ holdingsBySource }) {
+  const entries = Object.entries(holdingsBySource ?? {}).sort((a, b) => b[1] - a[1])
+  const total = entries.reduce((s, [, v]) => s + v, 0)
   if (!total) return <p className="text-sm text-secondary-400">No holdings data</p>
-  const bdcPct = (bdc / total) * 100
-  const synPct = (synthetic / total) * 100
   return (
     <div className="space-y-3">
       <div className="flex h-7 rounded-md overflow-hidden text-xs font-medium">
-        {bdcPct > 0 && (
-          <div className="bg-primary-600 flex items-center justify-center text-white" style={{ width: `${bdcPct}%` }} title={`BDC: ${formatNumber(bdc)}`}>
-            {bdcPct > 8 ? `${bdcPct.toFixed(0)}%` : ''}
-          </div>
-        )}
-        {synPct > 0 && (
-          <div className="bg-secondary-300 flex items-center justify-center text-secondary-700" style={{ width: `${synPct}%` }} title={`Synthetic: ${formatNumber(synthetic)}`}>
-            {synPct > 8 ? `${synPct.toFixed(0)}%` : ''}
-          </div>
-        )}
+        {entries.map(([source, count]) => {
+          const pct = (count / total) * 100
+          if (pct === 0) return null
+          const cfg = SOURCE_CONFIG[source] ?? { label: source, color: 'bg-teal-500', text: 'text-white' }
+          return (
+            <div
+              key={source}
+              className={`${cfg.color} ${cfg.text} flex items-center justify-center`}
+              style={{ width: `${pct}%` }}
+              title={`${cfg.label}: ${formatNumber(count)}`}
+            >
+              {pct > 8 ? `${pct.toFixed(0)}%` : ''}
+            </div>
+          )
+        })}
       </div>
-      <div className="flex items-center gap-4 text-xs text-secondary-600">
-        <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-primary-600 inline-block" />BDC / Real ({formatNumber(bdc)} holdings)</span>
-        <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-secondary-300 inline-block" />Synthetic ({formatNumber(synthetic)} holdings)</span>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-secondary-600">
+        {entries.map(([source, count]) => {
+          const cfg = SOURCE_CONFIG[source] ?? { label: source, color: 'bg-teal-500' }
+          return (
+            <span key={source} className="flex items-center gap-1.5">
+              <span className={`h-2.5 w-2.5 rounded-sm ${cfg.color} inline-block`} />
+              {cfg.label} ({formatNumber(count)})
+            </span>
+          )
+        })}
       </div>
     </div>
   )
@@ -965,24 +984,22 @@ export default function PipelineMonitorPage() {
                 <div className="h-3 w-48 bg-secondary-100 rounded animate-pulse" />
               </div>
             ) : (
-              <SourceBreakdownBar
-                bdc={pipelineStats?.bdc_holdings ?? 0}
-                synthetic={pipelineStats?.synthetic_holdings ?? 0}
-                total={pipelineStats?.total_holdings ?? 0}
-              />
+              <SourceBreakdownBar holdingsBySource={pipelineStats?.holdings_by_source ?? {}} />
             )}
-            {!pipelineLoading && pipelineStats && (
-              <div className="pt-2 border-t border-secondary-100 grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-secondary-500 text-xs">BDC Holdings</p>
-                  <p className="font-bold text-secondary-900 mt-0.5">{formatNumber(pipelineStats.bdc_holdings)}</p>
-                  <p className="text-xs text-secondary-400">ARCC · MAIN · OBDC</p>
-                </div>
-                <div>
-                  <p className="text-secondary-500 text-xs">Synthetic Holdings</p>
-                  <p className="font-bold text-secondary-900 mt-0.5">{formatNumber(pipelineStats.synthetic_holdings)}</p>
-                  <p className="text-xs text-secondary-400">Generated test data</p>
-                </div>
+            {!pipelineLoading && pipelineStats?.holdings_by_source && (
+              <div className="pt-2 border-t border-secondary-100 grid grid-cols-2 gap-3 text-sm">
+                {Object.entries(pipelineStats.holdings_by_source)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([source, count]) => {
+                    const cfg = SOURCE_CONFIG[source] ?? { label: source }
+                    return (
+                      <div key={source}>
+                        <p className="text-secondary-500 text-xs">{cfg.label}</p>
+                        <p className="font-bold text-secondary-900 mt-0.5">{formatNumber(count)}</p>
+                      </div>
+                    )
+                  })
+                }
               </div>
             )}
           </CardContent>

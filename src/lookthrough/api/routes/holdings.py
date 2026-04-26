@@ -41,12 +41,13 @@ def _industry_col():
     return func.coalesce(DimCompany.primary_industry, "Unclassified")
 
 def _country_col():
-    # Prefer the holding's reported country; fall back to canonical, then Unknown
-    return func.coalesce(
-        FactReportedHolding.reported_country,
-        DimCompany.primary_country,
-        "Unknown",
+    # NULLIF strips literal "NaN" / "nan" strings written by pandas before the
+    # COALESCE falls through to primary_country and finally "Unknown".
+    reported = func.nullif(
+        func.nullif(FactReportedHolding.reported_country, "NaN"),
+        "nan",
     )
+    return func.coalesce(reported, DimCompany.primary_country, "Unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +308,9 @@ def get_filter_options(
         for r in industry_rows
     ]
 
-    # Distinct countries
+    # Distinct countries — exclude any residual "NaN"/"nan" strings at the Python level
+    # as an extra guard beyond the NULLIF in _country_col().
+    _NAN_STRINGS = {"NaN", "nan", "NAN", "None", "null"}
     country_rows = (
         db.query(country_col.label("country"))
         .select_from(FactReportedHolding)
@@ -316,7 +319,10 @@ def get_filter_options(
         .order_by(country_col)
         .all()
     )
-    countries = [r.country for r in country_rows if r.country and r.country != "Unknown"]
+    countries = [
+        r.country for r in country_rows
+        if r.country and r.country not in _NAN_STRINGS and r.country != "Unknown"
+    ]
     if any(r.country == "Unknown" for r in country_rows):
         countries.append("Unknown")
 

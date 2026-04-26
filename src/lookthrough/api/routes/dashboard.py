@@ -198,20 +198,29 @@ def get_sector_breakdown(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Return top 10 sectors by holding count, with total value where available."""
-    total_holdings_count = (
-        db.query(func.count(FactReportedHolding.reported_holding_id)).scalar() or 1
-    )
+    """Return top 10 sectors by LP-scaled exposure value at each fund's latest date."""
+    latest_sq = _latest_per_fund_sq(db)
+    total_scaled = sum(_scaled_totals_by_fund(db).values()) or 1.0
 
     rows = (
         db.query(
             func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+            func.count(distinct(FactLpScaledExposure.scaled_exposure_id)).label("holding_count"),
+        )
+        .join(
+            FactReportedHolding,
+            FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id,
         )
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .join(
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+        )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
         .group_by(func.coalesce(DimCompany.primary_sector, "Unclassified"))
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
         .limit(10)
         .all()
     )
@@ -221,7 +230,7 @@ def get_sector_breakdown(
             "sector": row.sector,
             "total_value": float(row.total_value) if row.total_value is not None else None,
             "holding_count": row.holding_count,
-            "percentage": round(row.holding_count / total_holdings_count * 100, 2),
+            "percentage": round(float(row.total_value) / total_scaled * 100, 2) if row.total_value else 0.0,
         }
         for row in rows
     ]
@@ -239,37 +248,38 @@ def get_fund_breakdown(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Return per-fund summary with holding count and AUM."""
-    total_holdings_count = (
-        db.query(func.count(FactReportedHolding.reported_holding_id)).scalar() or 1
-    )
+    """Return per-fund summary with holding count and LP-scaled AUM."""
+    latest_sq = _latest_per_fund_sq(db)
+    total_scaled = sum(_scaled_totals_by_fund(db).values()) or 1.0
 
     rows = (
         db.query(
             DimFund.fund_id,
             DimFund.fund_name,
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            func.count(distinct(FactLpScaledExposure.scaled_exposure_id)).label("holding_count"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
         )
-        .join(FactFundReport, FactFundReport.fund_id == DimFund.fund_id)
+        .join(DimFund, FactLpScaledExposure.fund_id == DimFund.fund_id)
         .join(
-            FactReportedHolding,
-            FactReportedHolding.fund_report_id == FactFundReport.fund_report_id,
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
         )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
         .group_by(DimFund.fund_id, DimFund.fund_name)
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
         .all()
     )
 
     funds = [
         {
-            "fund_id": row.fund_id,
+            "fund_id": str(row.fund_id),
             "fund_name": row.fund_name,
             "holding_count": row.holding_count,
             "total_value": float(row.total_value) if row.total_value is not None else None,
             "percentage_of_portfolio": round(
-                row.holding_count / total_holdings_count * 100, 2
-            ),
+                float(row.total_value) / total_scaled * 100, 2
+            ) if row.total_value else 0.0,
         }
         for row in rows
     ]

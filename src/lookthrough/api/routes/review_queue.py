@@ -743,12 +743,19 @@ def get_pipeline_stats(
         .filter(FactReportedHolding.reported_value_usd.isnot(None))
         .scalar() or 0
     )
-    synthetic_holdings = (
-        db.query(func.count(FactReportedHolding.reported_holding_id))
-        .filter(FactReportedHolding.source == "synthetic")
-        .scalar() or 0
+    source_count_rows = (
+        db.query(
+            FactReportedHolding.source,
+            func.count(FactReportedHolding.reported_holding_id).label("cnt"),
+        )
+        .filter(FactReportedHolding.source.isnot(None))
+        .group_by(FactReportedHolding.source)
+        .all()
     )
-    bdc_holdings = total_holdings - synthetic_holdings
+    holdings_by_source = {r.source: r.cnt for r in source_count_rows}
+    # Backward-compat aliases
+    synthetic_holdings = holdings_by_source.get("synthetic", 0)
+    bdc_holdings = sum(v for k, v in holdings_by_source.items() if k != "synthetic")
 
     recent_run_rows = (
         db.query(FactAuditEvent)
@@ -778,6 +785,7 @@ def get_pipeline_stats(
         "total_holdings": total_holdings,
         "entity_resolution_rate": pct(resolved_holdings, total_holdings),
         "holdings_with_value_pct": pct(holdings_with_value, total_holdings),
+        "holdings_by_source": holdings_by_source,
         "bdc_holdings": bdc_holdings,
         "synthetic_holdings": synthetic_holdings,
         "recent_runs": recent_runs,

@@ -690,6 +690,7 @@ def parse_all_13f_filers(quarters: int = 8, db_mode: bool = True) -> None:
     holdings_df = pd.DataFrame(all_holdings).drop_duplicates(
         subset=["reported_holding_id"]
     )
+    holdings_df["reported_country"] = "United States"  # 13F covers only US-listed securities
 
     companies_df = pd.DataFrame(
         _build_company_stubs(all_holdings, db_mode=db_mode)
