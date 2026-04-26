@@ -277,6 +277,9 @@ class FactReviewQueueItem(Base):
     reviewer_notes: Mapped[str] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[str] = mapped_column(String(50), nullable=True)
     resolved_by: Mapped[str] = mapped_column(String(255), nullable=True)
+    ai_suggested_sector: Mapped[str] = mapped_column(String(255), nullable=True)
+    ai_suggested_industry: Mapped[str] = mapped_column(String(255), nullable=True)
+    ai_suggested_country: Mapped[str] = mapped_column(String(255), nullable=True)
 
 
 class FactAuditEvent(Base):

@@ -1,8 +1,10 @@
 """Review queue API endpoints for approving, rejecting, and dismissing flagged items."""
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -36,6 +38,9 @@ VALID_STATUSES = {"pending", "approved", "rejected", "dismissed"}
 class StatusUpdateRequest(BaseModel):
     status: str
     reviewer_notes: Optional[str] = None
+    ai_suggested_sector: Optional[str] = None
+    ai_suggested_industry: Optional[str] = None
+    ai_suggested_country: Optional[str] = None
 
 
 class BulkStatusUpdateRequest(BaseModel):
@@ -83,6 +88,10 @@ def _item_to_dict(
         "resolved_at": item.resolved_at,
         "resolved_by": item.resolved_by,
         "primary_sector": primary_sector,
+        # AI suggestions stored on the item (written back to dim_company on approve)
+        "ai_suggested_sector": item.ai_suggested_sector,
+        "ai_suggested_industry": item.ai_suggested_industry,
+        "ai_suggested_country": item.ai_suggested_country,
         # Enriched fields
         "reported_sector": reported_sector,
         "ai_classification": ai_classification,
@@ -562,6 +571,14 @@ def update_queue_item(
     if item is None:
         raise HTTPException(status_code=404, detail="Queue item not found")
 
+    # Persist any AI suggestions passed in this request
+    if body.ai_suggested_sector is not None:
+        item.ai_suggested_sector = body.ai_suggested_sector
+    if body.ai_suggested_industry is not None:
+        item.ai_suggested_industry = body.ai_suggested_industry
+    if body.ai_suggested_country is not None:
+        item.ai_suggested_country = body.ai_suggested_country
+
     item.status = body.status
     item.reviewer_notes = body.reviewer_notes
     item.resolved_at = datetime.now(timezone.utc).isoformat()
@@ -576,6 +593,40 @@ def update_queue_item(
             .filter(DimCompany.company_id == item.company_id)
             .first()
         )
+
+    # On approve: write AI suggestions back to dim_company and log audit event
+    if body.status == "approved" and company is not None:
+        sector = item.ai_suggested_sector
+        industry = item.ai_suggested_industry
+        country = item.ai_suggested_country
+        if sector or industry or country:
+            if sector:
+                company.primary_sector = sector
+            if industry:
+                company.primary_industry = industry
+            if country:
+                company.primary_country = country
+            audit = FactAuditEvent(
+                audit_event_id=str(uuid4()),
+                run_id=str(uuid4()),
+                event_time=datetime.now(timezone.utc).isoformat(),
+                actor_type="user",
+                actor_id=current_user.email,
+                action="review_queue_approve",
+                entity_type="company",
+                entity_id=str(item.company_id),
+                payload_json=json.dumps({
+                    "company_id": str(item.company_id),
+                    "sector": sector,
+                    "industry": industry,
+                    "country": country,
+                    "approved_by": current_user.email,
+                    "queue_item_id": item_id,
+                }),
+            )
+            db.add(audit)
+            db.commit()
+            db.refresh(company)
 
     return _item_to_dict(
         item,

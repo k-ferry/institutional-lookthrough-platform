@@ -255,6 +255,16 @@ function DetailPanel({ item, onAction, actionLoading }) {
   const [selectedProvider, setSelectedProvider] = useState('claude')
   const [researchLoading, setResearchLoading] = useState(false)
   const [researchResult, setResearchResult] = useState(null)
+  // Classification override — pre-populate from stored suggestions or AI classification
+  const [suggestedSector, setSuggestedSector] = useState(
+    item.ai_suggested_sector ?? item.reported_sector ?? ''
+  )
+  const [suggestedIndustry, setSuggestedIndustry] = useState(
+    item.ai_suggested_industry ?? item.ai_classification?.node_name ?? ''
+  )
+  const [suggestedCountry, setSuggestedCountry] = useState(
+    item.ai_suggested_country ?? ''
+  )
   const ai = item.ai_classification
   const isProcessing = actionLoading === item.queue_item_id
 
@@ -497,8 +507,44 @@ function DetailPanel({ item, onAction, actionLoading }) {
         )}
       </div>
 
-      {/* BOTTOM — Reviewer notes + actions */}
-      <div className="mt-5 pt-4 border-t border-secondary-200">
+      {/* BOTTOM — Classification override + reviewer notes + actions */}
+      <div className="mt-5 pt-4 border-t border-secondary-200 space-y-3">
+        {/* Classification override fields — written to dim_company on Approve */}
+        <div>
+          <p className="text-xs font-semibold text-secondary-400 uppercase tracking-wide mb-2">
+            Apply on Approve
+            <span className="ml-1.5 font-normal normal-case text-secondary-400">(written to company record)</span>
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <input
+              type="text"
+              value={suggestedSector}
+              onChange={(e) => setSuggestedSector(e.target.value)}
+              placeholder="Sector (e.g. Financials)"
+              className="py-1.5 px-3 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            />
+            <input
+              type="text"
+              value={suggestedIndustry}
+              onChange={(e) => setSuggestedIndustry(e.target.value)}
+              placeholder="Industry (e.g. Asset Management)"
+              className="py-1.5 px-3 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            />
+            <input
+              type="text"
+              value={suggestedCountry}
+              onChange={(e) => setSuggestedCountry(e.target.value)}
+              placeholder="Country (e.g. United States)"
+              className="py-1.5 px-3 text-xs border border-secondary-200 rounded-md bg-white text-secondary-700 placeholder:text-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+            />
+          </div>
+          {(suggestedSector || suggestedIndustry || suggestedCountry) && (
+            <p className="text-xs text-green-700 mt-1.5">
+              Approving will write these values to <span className="font-medium">{item.company_name}</span>.
+            </p>
+          )}
+        </div>
+
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
           <input
             type="text"
@@ -509,7 +555,12 @@ function DetailPanel({ item, onAction, actionLoading }) {
           />
           <div className="flex items-center gap-2 shrink-0">
             <button
-              onClick={() => onAction(item.queue_item_id, 'approved', notes)}
+              onClick={() => onAction(
+                item.queue_item_id,
+                'approved',
+                notes,
+                { sector: suggestedSector, industry: suggestedIndustry, country: suggestedCountry },
+              )}
               disabled={isProcessing || item.status === 'approved'}
               className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
@@ -583,8 +634,8 @@ export default function ReviewQueuePage() {
   const totalPages = Math.max(1, Math.ceil(total / filters.pageSize))
   const allSelected = items.length > 0 && selectedIds.size === items.length
 
-  // notes param is passed from the detail panel; inline buttons omit it
-  async function handleAction(itemId, status, notes = null) {
+  // notes + aiSuggestions params are passed from the detail panel; inline buttons omit them
+  async function handleAction(itemId, status, notes = null, aiSuggestions = null) {
     setActionLoading(itemId)
     setActionError(null)
     try {
@@ -595,6 +646,9 @@ export default function ReviewQueuePage() {
         body: JSON.stringify({
           status,
           ...(notes ? { reviewer_notes: notes } : {}),
+          ...(aiSuggestions?.sector ? { ai_suggested_sector: aiSuggestions.sector } : {}),
+          ...(aiSuggestions?.industry ? { ai_suggested_industry: aiSuggestions.industry } : {}),
+          ...(aiSuggestions?.country ? { ai_suggested_country: aiSuggestions.country } : {}),
         }),
       })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)

@@ -456,10 +456,13 @@ export default function DashboardPage() {
     queryFn: () => fetchJSON('/api/dashboard/geography-breakdown'),
     staleTime: 10 * 60 * 1000,
   })
-  const _geoTotal = (geoBreakdownData ?? []).reduce((sum, g) => sum + (g.value_usd ?? 0), 0)
-  const _geoKnown = (geoBreakdownData ?? [])
-    .filter((g) => g.country !== 'Unknown')
-    .reduce((sum, g) => sum + (g.value_usd ?? 0), 0)
+  const _geoArr = Array.isArray(geoBreakdownData)
+    ? geoBreakdownData
+    : (geoBreakdownData?.data ?? geoBreakdownData?.items ?? [])
+  const _geoTotal = _geoArr.reduce((sum, g) => sum + (Number(g.value_usd) || 0), 0)
+  const _geoKnown = _geoArr
+    .filter((g) => g.country !== 'Unknown' && g.value_usd && !isNaN(Number(g.value_usd)) && Number(g.value_usd) > 0)
+    .reduce((sum, g) => sum + (Number(g.value_usd) || 0), 0)
   const showGeoToggle = _geoTotal > 0 && _geoKnown / _geoTotal > 0.20
 
   // If geography toggle disappears while selected, fall back to sector

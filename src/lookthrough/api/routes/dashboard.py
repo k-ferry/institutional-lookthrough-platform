@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import distinct, func
+from sqlalchemy import case, distinct, func
 from sqlalchemy.orm import Session
 
 from src.lookthrough.auth.dependencies import get_current_user, get_db
@@ -73,6 +73,38 @@ def _scaled_totals_by_fund(db: Session) -> dict[str, float]:
         .all()
     )
     return {str(r.fund_id): float(r.total) if r.total else 0.0 for r in rows}
+
+def _normalize_country(col):
+    """Normalize ISO-2 codes and common aliases to consistent full country names.
+
+    Prevents duplicate groups when dim_company stores ISO codes ('US') while
+    reported_country uses full names ('United States').
+    """
+    return case(
+        (col.in_(["US", "USA"]), "United States"),
+        (col.in_(["GB", "UK"]), "United Kingdom"),
+        (col.in_(["DE"]), "Germany"),
+        (col.in_(["JP"]), "Japan"),
+        (col.in_(["CN"]), "China"),
+        (col.in_(["CA"]), "Canada"),
+        (col.in_(["FR"]), "France"),
+        (col.in_(["AU"]), "Australia"),
+        (col.in_(["CH"]), "Switzerland"),
+        (col.in_(["NL"]), "Netherlands"),
+        (col.in_(["SE"]), "Sweden"),
+        (col.in_(["IE"]), "Ireland"),
+        (col.in_(["IT"]), "Italy"),
+        (col.in_(["ES"]), "Spain"),
+        (col.in_(["KR"]), "South Korea"),
+        (col.in_(["IN"]), "India"),
+        (col.in_(["BR"]), "Brazil"),
+        (col.in_(["SG"]), "Singapore"),
+        (col.in_(["HK"]), "Hong Kong"),
+        (col.in_(["IL"]), "Israel"),
+        (col.in_(["MX"]), "Mexico"),
+        else_=col,
+    )
+
 
 UNKNOWN_NODE_ID = "00000000-0000-0000-0000-000000000000"
 
@@ -251,36 +283,65 @@ def get_fund_breakdown(
 # ---------------------------------------------------------------------------
 
 def _geography_rows(db: Session, fund_id: str | None = None) -> dict:
-    """Shared query for geography breakdown, optionally filtered to one fund."""
-    country_col = func.coalesce(
-        DimCompany.primary_country,
-        FactReportedHolding.reported_country,
-        "Unknown",
+    """Geography breakdown using Northbridge's scaled_value_usd at the per-fund latest as_of_date.
+
+    Starts from fact_lp_scaled_exposure (not fact_reported_holding) so values are
+    always LP-scaled, never raw reported_value_usd.  COALESCE(scaled_value_usd, 0)
+    prevents NULL from propagating into SUM and avoids NaN in the JSON response.
+    """
+    # Subquery: latest as_of_date per fund from fact_lp_scaled_exposure
+    latest_per_fund = (
+        db.query(
+            FactLpScaledExposure.fund_id.label("fund_id"),
+            func.max(FactLpScaledExposure.as_of_date).label("latest_date"),
+        )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+        .group_by(FactLpScaledExposure.fund_id)
+        .subquery("geo_latest_per_fund")
     )
 
-    total_holdings = db.query(
-        func.count(FactReportedHolding.reported_holding_id)
+    country_col = _normalize_country(
+        func.coalesce(
+            DimCompany.primary_country,
+            FactReportedHolding.reported_country,
+            "Unknown",
+        )
     )
-    q = (
+    scaled_val = func.coalesce(FactLpScaledExposure.scaled_value_usd, 0)
+
+    base_joins = (
+        lambda qry: qry
+        .select_from(FactLpScaledExposure)
+        .join(
+            latest_per_fund,
+            (FactLpScaledExposure.fund_id == latest_per_fund.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_per_fund.c.latest_date),
+        )
+        .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+    )
+
+    q = base_joins(
         db.query(
             country_col.label("geography"),
             func.count(distinct(DimCompany.company_id)).label("company_count"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
+            func.sum(scaled_val).label("total_value"),
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
     )
-    if fund_id:
-        q = q.join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
-        q = q.filter(FactFundReport.fund_id == fund_id)
-        total_holdings = total_holdings.join(
-            FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id
-        ).filter(FactFundReport.fund_id == fund_id)
+    total_q = base_joins(
+        db.query(func.count(FactLpScaledExposure.scaled_exposure_id))
+    )
 
-    total = total_holdings.scalar() or 1
+    if fund_id:
+        q = q.filter(FactLpScaledExposure.fund_id == fund_id)
+        total_q = total_q.filter(FactLpScaledExposure.fund_id == fund_id)
+
+    total = total_q.scalar() or 1
     rows = (
         q.group_by(country_col)
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
+        .order_by(func.sum(scaled_val).desc())
         .all()
     )
 
@@ -289,7 +350,7 @@ def _geography_rows(db: Session, fund_id: str | None = None) -> dict:
             "geography": row.geography,
             "company_count": row.company_count,
             "holding_count": row.holding_count,
-            "total_value": float(row.total_value) if row.total_value is not None else None,
+            "total_value": float(row.total_value) if row.total_value is not None else 0.0,
             "percentage": round(row.holding_count / total * 100, 2),
         }
         for row in rows
@@ -447,10 +508,12 @@ def _build_portfolio_trend_response(
         return {"dates": [], "series": []}
 
     if dimension_type == "geography":
-        dim_col = func.coalesce(
-            DimCompany.primary_country,
-            FactReportedHolding.reported_country,
-            "Unknown",
+        dim_col = _normalize_country(
+            func.coalesce(
+                DimCompany.primary_country,
+                FactReportedHolding.reported_country,
+                "Unknown",
+            )
         )
     else:  # sector (default)
         dim_col = func.coalesce(DimCompany.primary_sector, "Unclassified")
@@ -1115,7 +1178,7 @@ def get_fund_detail(
     total_exposure = float(scaled_total) if scaled_total else 0.0
 
     # ---- Sector breakdown by value, latest quarter (scaled) ----
-    _scaled_val = func.coalesce(FactLpScaledExposure.scaled_value_usd, FactReportedHolding.reported_value_usd)
+    _scaled_val = func.coalesce(FactLpScaledExposure.scaled_value_usd, FactReportedHolding.reported_value_usd, 0)
     sector_q = (
         db.query(
             func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
@@ -1190,27 +1253,35 @@ def get_fund_detail(
     ]
 
     # ---- Geography breakdown by value, latest quarter (scaled) ----
-    country_col = func.coalesce(
-        DimCompany.primary_country,
-        FactReportedHolding.reported_country,
-        "Unknown",
+    # Pin FactLpScaledExposure to latest_scaled_date so multiple pipeline runs
+    # don't produce duplicate rows that inflate sums.
+    geo_country_col = _normalize_country(
+        func.coalesce(
+            DimCompany.primary_country,
+            FactReportedHolding.reported_country,
+            "Unknown",
+        )
     )
     geo_q = (
         db.query(
-            country_col.label("country"),
+            geo_country_col.label("country"),
             func.sum(_scaled_val).label("value_usd"),
         )
         .select_from(FactReportedHolding)
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .outerjoin(FactLpScaledExposure, FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
+        .outerjoin(
+            FactLpScaledExposure,
+            (FactReportedHolding.reported_holding_id == FactLpScaledExposure.reported_holding_id)
+            & (FactLpScaledExposure.as_of_date == latest_scaled_date),
+        )
         .filter(FactFundReport.fund_id == fund_id)
     )
     if latest_period:
         geo_q = geo_q.filter(FactFundReport.report_period_end == latest_period)
     geo_rows = (
         geo_q
-        .group_by(country_col)
+        .group_by(geo_country_col)
         .order_by(func.sum(_scaled_val).desc().nullslast())
         .all()
     )

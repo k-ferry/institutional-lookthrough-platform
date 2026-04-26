@@ -79,9 +79,24 @@ def init_db() -> None:
     """Create all tables defined in the ORM models.
 
     Uses Base.metadata.create_all() to create any tables that don't exist.
+    Also runs idempotent ALTER TABLE migrations for columns added after initial creation.
     """
+    from sqlalchemy import text
+
     engine = get_engine()
     Base.metadata.create_all(engine)
+
+    # Idempotent column migrations — safe to re-run on every startup
+    _column_migrations = [
+        "ALTER TABLE fact_review_queue_item ADD COLUMN IF NOT EXISTS ai_suggested_sector VARCHAR(255)",
+        "ALTER TABLE fact_review_queue_item ADD COLUMN IF NOT EXISTS ai_suggested_industry VARCHAR(255)",
+        "ALTER TABLE fact_review_queue_item ADD COLUMN IF NOT EXISTS ai_suggested_country VARCHAR(255)",
+    ]
+    with engine.connect() as conn:
+        for stmt in _column_migrations:
+            conn.execute(text(stmt))
+        conn.commit()
+
     print(f"Database tables created/verified at: {engine.url}")
 
 

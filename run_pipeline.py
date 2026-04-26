@@ -68,8 +68,13 @@ STEPS = [
         'always': True,
     },
     {
-        'name': 'AI Classification',
+        'name': 'AI Classification (GICS)',
         'cmd': [sys.executable, '-m', 'src.lookthrough.ai.classify_companies'],
+        'always': False,
+    },
+    {
+        'name': 'AI Classification (Country)',
+        'cmd': [sys.executable, '-m', 'src.lookthrough.ai.classify_companies', '--taxonomy-type', 'country'],
         'always': False,
     },
     {
@@ -147,7 +152,7 @@ def main():
             cmd.append('--csv')
 
         # Add classification limit if applicable
-        if step['name'] == 'AI Classification' and args.classify:
+        if step['name'].startswith('AI Classification') and args.classify:
             cmd.extend(['--limit', str(args.limit)])
 
         print(f'\n--- {step["name"]} ---')

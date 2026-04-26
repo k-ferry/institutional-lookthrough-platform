@@ -110,12 +110,18 @@ function GeographyChart({ data }) {
         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
         <XAxis
           type="number"
+          dataKey="value"
           tick={{ fontSize: 11, fill: '#64748b' }}
           axisLine={false}
           tickLine={false}
-          tickFormatter={(v) => v.toLocaleString()}
+          tickFormatter={(v) => {
+            if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`
+            if (v >= 1e6) return `$${(v / 1e6).toFixed(0)}M`
+            if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}K`
+            return `$${v}`
+          }}
           label={{
-            value: 'Holdings',
+            value: 'AUM',
             position: 'insideBottomRight',
             offset: -4,
             fontSize: 10,
@@ -132,9 +138,9 @@ function GeographyChart({ data }) {
         />
         <Tooltip
           formatter={(value, _name, props) => {
-            const { total_value, pct, fullName } = props.payload
-            const valStr = total_value != null ? ` · ${formatAUM(total_value)}` : ''
-            return [`${value.toLocaleString()} holdings${valStr} (${pct}%)`, fullName]
+            const { holding_count, pct, fullName } = props.payload
+            const countStr = holding_count != null ? ` · ${holding_count.toLocaleString()} holdings` : ''
+            return [`${formatAUM(value)}${countStr} (${pct}%)`, fullName]
           }}
           contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
         />
@@ -162,8 +168,21 @@ export default function GeographyPage() {
     staleTime: 5 * 60 * 1000,
   })
 
-  const geographies = data?.geographies ?? []
   const totalHoldings = data?.total_holdings ?? 0
+
+  // Recalculate percentage client-side from total_value so it reflects value share,
+  // not holding count share (the API percentage is count-based).
+  const _rawGeos = (data?.geographies ?? []).filter(g => {
+    const c = String(g.geography ?? '').trim()
+    return c && c !== 'NaN' && c !== 'null' && c !== 'undefined'
+  })
+  const _valueTotal = _rawGeos.reduce((sum, g) => sum + (Number(g.total_value) || 0), 0)
+  const geographies = _rawGeos.map((g) => ({
+    ...g,
+    percentage: _valueTotal > 0
+      ? parseFloat(((Number(g.total_value) || 0) / _valueTotal * 100).toFixed(1))
+      : 0,
+  }))
 
   const unknownGeo = geographies.find((g) => g.geography === 'Unknown')
   const knownGeos = geographies.filter((g) => g.geography !== 'Unknown')
@@ -173,9 +192,9 @@ export default function GeographyPage() {
     ? ((holdingsWithData / totalHoldings) * 100).toFixed(1)
     : '0'
 
-  // Largest country by holding_count (API returns holding_count desc, but after sort it may change)
+  // Largest country by total_value (matches value-based percentage)
   const largestKnown = knownGeos.length > 0
-    ? [...knownGeos].sort((a, b) => b.holding_count - a.holding_count)[0]
+    ? [...knownGeos].sort((a, b) => (Number(b.total_value) || 0) - (Number(a.total_value) || 0))[0]
     : null
 
   // Sort table rows; Unknown is always pinned to the bottom
@@ -189,26 +208,26 @@ export default function GeographyPage() {
   }
 
   const sortedKnown = [...knownGeos].sort((a, b) => {
-    const va = a[sortKey] ?? -1
-    const vb = b[sortKey] ?? -1
+    const va = isNaN(Number(a[sortKey])) ? -1 : Number(a[sortKey])
+    const vb = isNaN(Number(b[sortKey])) ? -1 : Number(b[sortKey])
     return sortDir === 'desc' ? vb - va : va - vb
   })
   const tableRows = unknownGeo ? [...sortedKnown, unknownGeo] : sortedKnown
 
-  // Chart data: known countries first (by holding_count desc), Unknown at bottom
-  const chartData = [
-    ...[...knownGeos].sort((a, b) => b.holding_count - a.holding_count),
-    ...(unknownGeo ? [unknownGeo] : []),
-  ].map((g) => ({
-    label: flagLabel(g.geography).length > 22
-      ? flagLabel(g.geography).slice(0, 20) + '…'
-      : flagLabel(g.geography),
-    fullName: g.geography,
-    value: g.holding_count,
-    total_value: g.total_value,
-    pct: g.percentage,
-    color: getColor(g.geography),
-  }))
+  // Chart data: all countries sorted by value DESC (Unknown included inline, not pinned).
+  const chartData = [...geographies]
+    .filter((g) => g.holding_count > 0)
+    .sort((a, b) => (Number(b.total_value) || 0) - (Number(a.total_value) || 0))
+    .map((g) => ({
+      label: flagLabel(g.geography).length > 22
+        ? flagLabel(g.geography).slice(0, 20) + '…'
+        : flagLabel(g.geography),
+      fullName: g.geography,
+      value: Number(g.total_value) || 0,
+      holding_count: Number(g.holding_count) || 0,
+      pct: Number(g.percentage) || 0,
+      color: getColor(g.geography),
+    }))
 
   const thClass = (col) =>
     `text-left py-3 px-4 font-semibold text-secondary-600 text-xs uppercase tracking-wide cursor-pointer select-none hover:text-secondary-800 whitespace-nowrap`
@@ -264,14 +283,14 @@ export default function GeographyPage() {
         <StatCard
           title="Largest Country Exposure"
           value={largestKnown ? flagLabel(largestKnown.geography) : '—'}
-          sub={largestKnown ? `${largestKnown.percentage}% of holdings` : undefined}
+          sub={largestKnown ? `${largestKnown.percentage}% of portfolio value` : undefined}
         />
       </div>
 
       {/* Bar chart */}
       <Card>
         <CardHeader>
-          <CardTitle>Holdings by Country</CardTitle>
+          <CardTitle>AUM by Country</CardTitle>
         </CardHeader>
         <CardContent>
           {chartData.length ? (
@@ -357,7 +376,7 @@ export default function GeographyPage() {
                       {row.company_count.toLocaleString()}
                     </td>
                     <td className="py-3 px-4 text-right tabular-nums font-medium text-secondary-800">
-                      {row.total_value != null ? formatAUM(row.total_value) : '—'}
+                      {row.total_value != null && !isNaN(row.total_value) && row.total_value > 0 ? formatAUM(row.total_value) : '—'}
                     </td>
                     <td className="py-3 px-4 text-right">
                       <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
