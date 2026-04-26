@@ -387,6 +387,116 @@ def get_geography_breakdown_by_fund(
     return _geography_rows(db, fund_id=fund_id)
 
 
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/industry-breakdown
+# ---------------------------------------------------------------------------
+
+
+@router.get("/industry-breakdown")
+def get_industry_breakdown(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """Top 10 industries by LP-scaled exposure at each fund's latest as_of_date."""
+    latest_sq = _latest_per_fund_sq(db)
+    total_scaled = sum(_scaled_totals_by_fund(db).values()) or 1.0
+
+    rows = (
+        db.query(
+            func.coalesce(DimCompany.primary_industry, "Unclassified").label("industry"),
+            func.coalesce(DimCompany.primary_sector, "Unclassified").label("sector"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+        )
+        .join(
+            FactReportedHolding,
+            FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id,
+        )
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .join(
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+        )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+        .group_by(
+            func.coalesce(DimCompany.primary_industry, "Unclassified"),
+            func.coalesce(DimCompany.primary_sector, "Unclassified"),
+        )
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
+        .limit(10)
+        .all()
+    )
+
+    return {
+        "industries": [
+            {
+                "industry": row.industry,
+                "sector": row.sector,
+                "value_usd": float(row.total_value) if row.total_value is not None else 0.0,
+                "pct": round(float(row.total_value) / total_scaled * 100, 2) if row.total_value else 0.0,
+            }
+            for row in rows
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/country-breakdown
+# ---------------------------------------------------------------------------
+
+
+@router.get("/country-breakdown")
+def get_country_breakdown(
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """All countries by LP-scaled exposure at each fund's latest as_of_date."""
+    latest_sq = _latest_per_fund_sq(db)
+    total_scaled = sum(_scaled_totals_by_fund(db).values()) or 1.0
+
+    country_col = _normalize_country(
+        func.coalesce(
+            DimCompany.primary_country,
+            FactReportedHolding.reported_country,
+            "Unknown",
+        )
+    )
+
+    rows = (
+        db.query(
+            country_col.label("country"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+            func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
+        )
+        .join(
+            FactReportedHolding,
+            FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id,
+        )
+        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .join(
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+        )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+        .group_by(country_col)
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
+        .all()
+    )
+
+    return {
+        "countries": [
+            {
+                "country": row.country,
+                "value_usd": float(row.total_value) if row.total_value is not None else 0.0,
+                "pct": round(float(row.total_value) / total_scaled * 100, 2) if row.total_value else 0.0,
+                "holding_count": row.holding_count,
+            }
+            for row in rows
+        ]
+    }
+
+
 # ===========================================================================
 # Exposure Trend  —  GET /api/dashboard/exposure-trend
 #                    GET /api/dashboard/exposure-trend/fund/{fund_id}
@@ -501,14 +611,17 @@ def _build_portfolio_trend_response(
     dimension_type: str,
     periods: int,
 ) -> dict:
-    """Portfolio-level trend using Northbridge's scaled exposure from fact_lp_scaled_exposure."""
-    # Last `periods` distinct as_of_dates that have scaled data
-    # Date list: distinct latest-dates across all funds (per-fund, not global max)
-    latest_sq = _latest_per_fund_sq(db)
+    """Portfolio-level trend using Northbridge's scaled exposure from fact_lp_scaled_exposure.
+
+    Uses ALL available quarters (not just per-fund latest) so the chart has
+    multiple data points when the pipeline has been run for multiple periods.
+    """
+    # All distinct as_of_dates across all funds, most-recent first
     date_rows = (
-        db.query(latest_sq.c.max_date)
+        db.query(FactLpScaledExposure.as_of_date)
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
         .distinct()
-        .order_by(latest_sq.c.max_date.desc())
+        .order_by(FactLpScaledExposure.as_of_date.desc())
         .limit(periods)
         .all()
     )
@@ -528,17 +641,12 @@ def _build_portfolio_trend_response(
     else:  # sector (default)
         dim_col = func.coalesce(DimCompany.primary_sector, "Unclassified")
 
-    # Only include each fund's contribution at its own latest date
+    # Sum all funds' contributions for each quarter — no latest-date filter
     rows = (
         db.query(
             FactLpScaledExposure.as_of_date,
             dim_col.label("dim_name"),
             func.sum(FactLpScaledExposure.scaled_value_usd).label("value"),
-        )
-        .join(
-            latest_sq,
-            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
-            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
         )
         .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)

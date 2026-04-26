@@ -4,6 +4,9 @@ import { Link } from 'react-router-dom'
 import {
   AreaChart,
   Area,
+  BarChart,
+  Bar,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -109,6 +112,22 @@ const SOURCE_GROUP_ORDER = ['pdf_document', '13f_filing', 'bdc_filing', 'synthet
 const TREND_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16',
 ]
+
+// Sector → bar color for industry chart
+const SECTOR_COLORS = {
+  'Information Technology': '#6366f1',
+  'Health Care': '#10b981',
+  'Financials': '#3b82f6',
+  'Consumer Discretionary': '#f59e0b',
+  'Industrials': '#8b5cf6',
+  'Communication Services': '#06b6d4',
+  'Consumer Staples': '#84cc16',
+  'Energy': '#ef4444',
+  'Materials': '#f97316',
+  'Real Estate': '#ec4899',
+  'Utilities': '#14b8a6',
+  'Unclassified': '#94a3b8',
+}
 
 // ---------------------------------------------------------------------------
 // Skeletons
@@ -426,6 +445,133 @@ function FundLineupTable({ funds, loading }) {
 }
 
 // ---------------------------------------------------------------------------
+// Industry Breakdown Chart
+// ---------------------------------------------------------------------------
+
+function IndustryBreakdownChart({ data, loading }) {
+  if (loading) {
+    return (
+      <div className="space-y-2 py-2">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="h-7 bg-secondary-100 rounded animate-pulse" />
+        ))}
+      </div>
+    )
+  }
+
+  const items = data?.industries ?? []
+  if (!items.length) {
+    return (
+      <div className="h-32 flex items-center justify-center text-secondary-400 text-sm">
+        No industry data available
+      </div>
+    )
+  }
+
+  const chartData = items.map((d) => ({
+    name: d.industry.length > 26 ? d.industry.slice(0, 26) + '…' : d.industry,
+    value: d.value_usd,
+    pct: d.pct,
+    sector: d.sector,
+    fill: SECTOR_COLORS[d.sector] ?? '#94a3b8',
+  }))
+
+  return (
+    <ResponsiveContainer width="100%" height={chartData.length * 34 + 16}>
+      <BarChart
+        data={chartData}
+        layout="vertical"
+        margin={{ left: 4, right: 48, top: 2, bottom: 2 }}
+      >
+        <XAxis type="number" hide />
+        <YAxis
+          type="category"
+          dataKey="name"
+          width={160}
+          tick={{ fontSize: 11, fill: '#64748b' }}
+          axisLine={false}
+          tickLine={false}
+        />
+        <Tooltip
+          formatter={(value, _, props) => [
+            `${formatAUM(value)} (${props.payload.pct?.toFixed(1)}%)`,
+            props.payload.sector,
+          ]}
+          contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
+        />
+        <Bar dataKey="value" radius={[0, 3, 3, 0]}>
+          {chartData.map((entry, i) => (
+            <Cell key={i} fill={entry.fill} fillOpacity={0.85} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Country Breakdown Chart
+// ---------------------------------------------------------------------------
+
+function CountryBreakdownChart({ data, loading }) {
+  if (loading) {
+    return (
+      <div className="space-y-2 py-2">
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="h-7 bg-secondary-100 rounded animate-pulse" />
+        ))}
+      </div>
+    )
+  }
+
+  const items = (data?.countries ?? []).filter(
+    (c) => c.country !== 'Unknown' && c.value_usd > 0,
+  )
+  if (items.length <= 2) {
+    return (
+      <div className="h-32 flex items-center justify-center text-secondary-400 text-sm">
+        Insufficient country data
+      </div>
+    )
+  }
+
+  const chartData = items.map((d) => ({
+    name: d.country.length > 20 ? d.country.slice(0, 20) + '…' : d.country,
+    value: d.value_usd,
+    pct: d.pct,
+    holding_count: d.holding_count,
+  }))
+
+  return (
+    <ResponsiveContainer width="100%" height={chartData.length * 34 + 16}>
+      <BarChart
+        data={chartData}
+        layout="vertical"
+        margin={{ left: 4, right: 48, top: 2, bottom: 2 }}
+      >
+        <XAxis type="number" hide />
+        <YAxis
+          type="category"
+          dataKey="name"
+          width={120}
+          tick={{ fontSize: 11, fill: '#64748b' }}
+          axisLine={false}
+          tickLine={false}
+        />
+        <Tooltip
+          formatter={(value, _, props) => [
+            `${formatAUM(value)} (${props.payload.pct?.toFixed(1)}%)`,
+            `${props.payload.holding_count} holdings`,
+          ]}
+          contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
+        />
+        <Bar dataKey="value" fill="#1d4ed8" fillOpacity={0.8} radius={[0, 3, 3, 0]} />
+      </BarChart>
+    </ResponsiveContainer>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -448,6 +594,18 @@ export default function DashboardPage() {
     queryKey: ['dashboard-funds-summary'],
     queryFn: () => fetchJSON('/api/dashboard/funds-summary'),
     staleTime: 5 * 60 * 1000,
+  })
+
+  const { data: industryData, isLoading: industryLoading } = useQuery({
+    queryKey: ['dashboard-industry-breakdown'],
+    queryFn: () => fetchJSON('/api/dashboard/industry-breakdown'),
+    staleTime: 10 * 60 * 1000,
+  })
+
+  const { data: countryData, isLoading: countryLoading } = useQuery({
+    queryKey: ['dashboard-country-breakdown'],
+    queryFn: () => fetchJSON('/api/dashboard/country-breakdown'),
+    staleTime: 10 * 60 * 1000,
   })
 
   // Determine if geography data has enough known countries to be worth showing
@@ -583,6 +741,32 @@ export default function DashboardPage() {
           <ExposureTrendChart data={trendData} loading={trendLoading} />
         </CardContent>
       </Card>
+
+      {/* Industry + Country Breakdown */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Industries</CardTitle>
+            <p className="text-xs text-secondary-400 mt-0.5">
+              By scaled exposure — latest quarter, color-coded by sector
+            </p>
+          </CardHeader>
+          <CardContent>
+            <IndustryBreakdownChart data={industryData} loading={industryLoading} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Geographic Exposure</CardTitle>
+            <p className="text-xs text-secondary-400 mt-0.5">
+              By country — latest quarter
+            </p>
+          </CardHeader>
+          <CardContent>
+            <CountryBreakdownChart data={countryData} loading={countryLoading} />
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Fund Lineup */}
       <Card>

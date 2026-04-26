@@ -11,6 +11,7 @@ from src.lookthrough.db.models import (
     DimCompany,
     DimFund,
     FactFundReport,
+    FactLpScaledExposure,
     FactReportedHolding,
     GICSMapping,
     User,
@@ -18,10 +19,21 @@ from src.lookthrough.db.models import (
 
 gics_router = APIRouter(prefix="/api/gics", tags=["gics"])
 
+LP_NAME = "Northbridge Endowment Fund"
 
-# ---------------------------------------------------------------------------
-# Shared column expressions
-# ---------------------------------------------------------------------------
+
+def _latest_per_fund_sq(db: Session):
+    """Subquery: (fund_id, max_date) — each fund's latest scaled as_of_date."""
+    return (
+        db.query(
+            FactLpScaledExposure.fund_id.label("fund_id"),
+            func.max(FactLpScaledExposure.as_of_date).label("max_date"),
+        )
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+        .group_by(FactLpScaledExposure.fund_id)
+        .subquery()
+    )
+
 
 def _sector_col():
     return func.coalesce(
@@ -47,20 +59,30 @@ def get_gics_sectors(
 ) -> dict:
     """All GICS sectors with holding counts, company counts, AUM, and percentages."""
     sector_col = _sector_col()
-    total = db.query(func.count(FactReportedHolding.reported_holding_id)).scalar() or 1
+    latest_sq = _latest_per_fund_sq(db)
 
     rows = (
         db.query(
             sector_col.label("sector"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
             func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
         )
+        .select_from(FactLpScaledExposure)
+        .join(
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+        )
+        .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
         .group_by(sector_col)
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
         .all()
     )
+
+    total = sum(r.holding_count for r in rows) or 1
 
     return {
         "sectors": [
@@ -92,48 +114,60 @@ def get_sector_detail(
     sector_col = _sector_col()
     company_name_col = _company_name_col()
     ig_col = func.coalesce(GICSMapping.gics_industry_group_name, "Unknown")
+    latest_sq = _latest_per_fund_sq(db)
+
+    def base_joins(qry):
+        return (
+            qry
+            .select_from(FactLpScaledExposure)
+            .join(
+                latest_sq,
+                (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+                & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+            )
+            .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
+            .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+            .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
+            .filter(FactLpScaledExposure.lp_name == LP_NAME, sector_col == sector_name)
+        )
 
     # Sector totals
-    totals = (
+    totals = base_joins(
         db.query(
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
             func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .filter(sector_col == sector_name)
-        .one()
-    )
+    ).one()
     holding_total = totals.holding_count or 1
 
     # Industry groups
     ig_rows = (
-        db.query(
-            ig_col.label("industry_group"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+        base_joins(
+            db.query(
+                ig_col.label("industry_group"),
+                func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
+                func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
+                func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+            )
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
-        .filter(sector_col == sector_name)
         .group_by(ig_col)
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
         .all()
     )
 
-    # Top 10 companies by value
+    # Top 10 companies by scaled value
     top_rows = (
-        db.query(
-            FactReportedHolding.company_id,
-            company_name_col.label("company_name"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+        base_joins(
+            db.query(
+                FactReportedHolding.company_id,
+                company_name_col.label("company_name"),
+                func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
+                func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+            )
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .filter(sector_col == sector_name)
         .group_by(FactReportedHolding.company_id, company_name_col)
-        .order_by(func.coalesce(func.sum(FactReportedHolding.reported_value_usd), 0).desc())
+        .order_by(func.coalesce(func.sum(FactLpScaledExposure.scaled_value_usd), 0).desc())
         .limit(10)
         .all()
     )
@@ -180,50 +214,60 @@ def get_industry_detail(
     company_name_col = _company_name_col()
     ig_col = func.coalesce(GICSMapping.gics_industry_group_name, "Unknown")
     industry_col = func.coalesce(GICSMapping.gics_industry_name, "Unknown")
+    latest_sq = _latest_per_fund_sq(db)
+
+    def base_joins(qry):
+        return (
+            qry
+            .select_from(FactLpScaledExposure)
+            .join(
+                latest_sq,
+                (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+                & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+            )
+            .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
+            .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+            .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
+            .filter(FactLpScaledExposure.lp_name == LP_NAME, ig_col == industry_name)
+        )
 
     # Industry group totals
-    totals = (
+    totals = base_joins(
         db.query(
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
+            func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
             func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+            func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
-        .filter(ig_col == industry_name)
-        .one()
-    )
+    ).one()
     holding_total = totals.holding_count or 1
 
     # Industries within the group
     industry_rows = (
-        db.query(
-            industry_col.label("industry"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+        base_joins(
+            db.query(
+                industry_col.label("industry"),
+                func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
+                func.count(distinct(FactReportedHolding.company_id)).label("company_count"),
+                func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+            )
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
-        .filter(ig_col == industry_name)
         .group_by(industry_col)
-        .order_by(func.count(FactReportedHolding.reported_holding_id).desc())
+        .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
         .all()
     )
 
     # Top 10 companies
     top_rows = (
-        db.query(
-            FactReportedHolding.company_id,
-            company_name_col.label("company_name"),
-            func.count(FactReportedHolding.reported_holding_id).label("holding_count"),
-            func.sum(FactReportedHolding.reported_value_usd).label("total_value"),
+        base_joins(
+            db.query(
+                FactReportedHolding.company_id,
+                company_name_col.label("company_name"),
+                func.count(FactLpScaledExposure.scaled_exposure_id).label("holding_count"),
+                func.sum(FactLpScaledExposure.scaled_value_usd).label("total_value"),
+            )
         )
-        .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
-        .filter(ig_col == industry_name)
         .group_by(FactReportedHolding.company_id, company_name_col)
-        .order_by(func.coalesce(func.sum(FactReportedHolding.reported_value_usd), 0).desc())
+        .order_by(func.coalesce(func.sum(FactLpScaledExposure.scaled_value_usd), 0).desc())
         .limit(10)
         .all()
     )
@@ -270,11 +314,12 @@ def get_gics_holdings(
     db: Session = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Paginated holdings filtered to any GICS taxonomy level."""
+    """Paginated holdings filtered to any GICS taxonomy level, using scaled exposure values."""
     sector_col = _sector_col()
     company_name_col = _company_name_col()
     ig_col = func.coalesce(GICSMapping.gics_industry_group_name, "Unknown")
     industry_col = func.coalesce(GICSMapping.gics_industry_name, "Unknown")
+    latest_sq = _latest_per_fund_sq(db)
 
     q = (
         db.query(
@@ -283,15 +328,24 @@ def get_gics_holdings(
             company_name_col.label("company_name"),
             DimFund.fund_id,
             DimFund.fund_name,
+            FactLpScaledExposure.scaled_value_usd,
             FactReportedHolding.reported_value_usd,
             FactReportedHolding.reported_sector,
             FactReportedHolding.as_of_date,
             FactReportedHolding.source,
         )
+        .select_from(FactLpScaledExposure)
+        .join(
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
+        )
+        .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
         .outerjoin(GICSMapping, FactReportedHolding.reported_sector == GICSMapping.reported_sector)
         .join(FactFundReport, FactReportedHolding.fund_report_id == FactFundReport.fund_report_id)
         .join(DimFund, FactFundReport.fund_id == DimFund.fund_id)
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
     )
 
     if sector:
@@ -304,7 +358,7 @@ def get_gics_holdings(
     total = q.count()
     total_pages = max(1, (total + page_size - 1) // page_size)
     rows = (
-        q.order_by(func.coalesce(FactReportedHolding.reported_value_usd, 0).desc())
+        q.order_by(func.coalesce(FactLpScaledExposure.scaled_value_usd, 0).desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -318,7 +372,11 @@ def get_gics_holdings(
                 "company_name": r.company_name,
                 "fund_id": r.fund_id,
                 "fund_name": r.fund_name,
-                "reported_value_usd": float(r.reported_value_usd) if r.reported_value_usd is not None else None,
+                "reported_value_usd": (
+                    float(r.scaled_value_usd) if r.scaled_value_usd is not None
+                    else float(r.reported_value_usd) if r.reported_value_usd is not None
+                    else None
+                ),
                 "reported_sector": r.reported_sector,
                 "as_of_date": r.as_of_date,
                 "source": r.source,
