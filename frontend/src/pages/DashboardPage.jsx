@@ -468,44 +468,56 @@ function IndustryBreakdownChart({ data, loading }) {
     )
   }
 
-  const chartData = items.map((d) => ({
-    name: d.industry.length > 26 ? d.industry.slice(0, 26) + '…' : d.industry,
-    value: d.value_usd,
-    pct: d.pct,
-    sector: d.sector,
-    fill: SECTOR_COLORS[d.sector] ?? '#94a3b8',
-  }))
+  const chartData = items
+    .filter((d) => d.industry && d.industry !== 'Unclassified' && d.industry !== 'Unknown')
+    .map((d) => ({
+      name: d.industry.length > 26 ? d.industry.slice(0, 26) + '…' : d.industry,
+      value: d.value_usd,
+      pct: d.pct,
+      sector: d.sector,
+      fill: SECTOR_COLORS[d.sector] ?? '#94a3b8',
+    }))
 
   return (
-    <ResponsiveContainer width="100%" height={chartData.length * 34 + 16}>
-      <BarChart
-        data={chartData}
-        layout="vertical"
-        margin={{ left: 4, right: 48, top: 2, bottom: 2 }}
-      >
-        <XAxis type="number" hide />
-        <YAxis
-          type="category"
-          dataKey="name"
-          width={160}
-          tick={{ fontSize: 11, fill: '#64748b' }}
-          axisLine={false}
-          tickLine={false}
-        />
-        <Tooltip
-          formatter={(value, _, props) => [
-            `${formatAUM(value)} (${props.payload.pct?.toFixed(1)}%)`,
-            props.payload.sector,
-          ]}
-          contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
-        />
-        <Bar dataKey="value" radius={[0, 3, 3, 0]}>
-          {chartData.map((entry, i) => (
-            <Cell key={i} fill={entry.fill} fillOpacity={0.85} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
+    <>
+      <ResponsiveContainer width="100%" height={chartData.length * 34 + 32}>
+        <BarChart
+          data={chartData}
+          layout="vertical"
+          margin={{ left: 4, right: 48, top: 2, bottom: 4 }}
+        >
+          <CartesianGrid horizontal={false} stroke="#e2e8f0" />
+          <XAxis
+            type="number"
+            tick={{ fontSize: 10, fill: '#94a3b8' }}
+            axisLine={true}
+            tickLine={true}
+            tickFormatter={(v) => `$${(v / 1_000_000).toFixed(0)}M`}
+          />
+          <YAxis
+            type="category"
+            dataKey="name"
+            width={160}
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            axisLine={false}
+            tickLine={false}
+          />
+          <Tooltip
+            formatter={(value, _, props) => [
+              `${formatAUM(value)} (${props.payload.pct?.toFixed(1)}%)`,
+              props.payload.sector,
+            ]}
+            contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}
+          />
+          <Bar dataKey="value" radius={[0, 3, 3, 0]}>
+            {chartData.map((entry, i) => (
+              <Cell key={i} fill={entry.fill} fillOpacity={0.85} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+      <p className="text-xs text-secondary-400 mt-1 text-right">Showing classified holdings only</p>
+    </>
   )
 }
 
@@ -543,13 +555,20 @@ function CountryBreakdownChart({ data, loading }) {
   }))
 
   return (
-    <ResponsiveContainer width="100%" height={chartData.length * 34 + 16}>
+    <ResponsiveContainer width="100%" height={chartData.length * 34 + 32}>
       <BarChart
         data={chartData}
         layout="vertical"
-        margin={{ left: 4, right: 48, top: 2, bottom: 2 }}
+        margin={{ left: 4, right: 48, top: 2, bottom: 4 }}
       >
-        <XAxis type="number" hide />
+        <CartesianGrid horizontal={false} stroke="#e2e8f0" />
+        <XAxis
+          type="number"
+          tick={{ fontSize: 10, fill: '#94a3b8' }}
+          axisLine={true}
+          tickLine={true}
+          tickFormatter={(v) => `$${(v / 1_000_000).toFixed(0)}M`}
+        />
         <YAxis
           type="category"
           dataKey="name"
