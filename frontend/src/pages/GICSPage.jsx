@@ -237,7 +237,7 @@ function SectorsLevel({ onSelect }) {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {sectors.map((s) => {
             const color = sectorColor(s.sector)
-            const pct = total > 0 ? ((s.holding_count / total) * 100).toFixed(1) : '0'
+            const pct = s.percentage != null ? s.percentage.toFixed(1) : '0'
             return (
               <button
                 key={s.sector}

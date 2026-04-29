@@ -17,6 +17,8 @@ import {
   Briefcase,
   Globe,
   BarChart2,
+  Layers,
+  Tag,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { downloadExport } from '../utils/exportUtils'
@@ -323,6 +325,8 @@ export default function HoldingsPage() {
   const globalExposure = filterOpts?.total_exposure ?? 0
   const fundsCount = filterOpts?.funds?.length ?? 0
   const countriesCount = filterOpts?.countries?.length ?? 0
+  const sectorsCount = filterOpts?.sectors?.length ?? 0
+  const industriesCount = filterOpts?.industries?.length ?? 0
   const allIndustries = filterOpts?.industries ?? []
   const allFunds = filterOpts?.funds ?? []
   const allSectors = filterOpts?.sectors ?? []
@@ -363,8 +367,8 @@ export default function HoldingsPage() {
 
       {error && <ErrorBanner message={`Failed to load holdings: ${error.message}`} />}
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Stat cards — 2 rows of 3 */}
+      <div className="grid grid-cols-3 gap-4">
         <StatCard
           title="Total Holdings"
           value={globalTotal.toLocaleString()}
@@ -383,11 +387,25 @@ export default function HoldingsPage() {
           icon={BarChart2}
           sub="In portfolio"
         />
+      </div>
+      <div className="grid grid-cols-3 gap-4">
         <StatCard
           title="Countries"
           value={countriesCount.toLocaleString()}
           icon={Globe}
           sub="Geographic exposure"
+        />
+        <StatCard
+          title="Sectors"
+          value={sectorsCount.toLocaleString()}
+          icon={Layers}
+          sub="GICS sectors"
+        />
+        <StatCard
+          title="Industries"
+          value={industriesCount.toLocaleString()}
+          icon={Tag}
+          sub="GICS industries"
         />
       </div>
 

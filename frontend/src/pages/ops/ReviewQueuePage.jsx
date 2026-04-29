@@ -15,6 +15,10 @@ import {
   Info,
   Sparkles,
   Loader2,
+  Search,
+  ArrowUp,
+  ArrowDown,
+  ChevronsUpDown,
 } from 'lucide-react'
 import { Card, CardContent } from '../../components/ui/card'
 
@@ -55,6 +59,8 @@ const DEFAULT_FILTERS = {
   page: 1,
   pageSize: 50,
 }
+
+const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 }
 
 const COUNTRY_OPTIONS = [
   { value: 'United States', label: 'United States' },
@@ -720,6 +726,8 @@ export default function ReviewQueuePage() {
   const [actionLoading, setActionLoading] = useState(null)
   const [actionError, setActionError] = useState(null)
   const [expandedId, setExpandedId] = useState(null)
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState({ col: 'priority', dir: 'asc' })
 
   const setFilter = useCallback((key, value) => {
     setFilters((prev) => ({ ...prev, [key]: value, page: 1 }))
@@ -757,7 +765,44 @@ export default function ReviewQueuePage() {
   const total = data?.total ?? 0
   const counts = data?.counts ?? {}
   const totalPages = Math.max(1, Math.ceil(total / filters.pageSize))
-  const allSelected = items.length > 0 && selectedIds.size === items.length
+
+  const displayItems = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const filtered = q
+      ? items.filter((i) => i.company_name?.toLowerCase().includes(q))
+      : items
+    return [...filtered].sort((a, b) => {
+      let cmp = 0
+      if (sort.col === 'company') {
+        cmp = (a.company_name ?? '').localeCompare(b.company_name ?? '')
+      } else if (sort.col === 'priority') {
+        cmp = (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99)
+      } else if (sort.col === 'reason') {
+        cmp = (a.reason ?? '').localeCompare(b.reason ?? '')
+      } else if (sort.col === 'exposure') {
+        cmp = (a.exposure_value ?? 0) - (b.exposure_value ?? 0)
+      } else if (sort.col === 'status') {
+        cmp = (a.status ?? '').localeCompare(b.status ?? '')
+      }
+      return sort.dir === 'asc' ? cmp : -cmp
+    })
+  }, [items, search, sort])
+
+  const allSelected = displayItems.length > 0 && selectedIds.size === displayItems.length
+
+  function toggleSort(col) {
+    setSort((prev) => ({
+      col,
+      dir: prev.col === col && prev.dir === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+
+  function SortIcon({ col }) {
+    if (sort.col !== col) return <ChevronsUpDown className="h-3 w-3 text-secondary-300 ml-1 inline" />
+    return sort.dir === 'asc'
+      ? <ArrowUp className="h-3 w-3 text-primary-600 ml-1 inline" />
+      : <ArrowDown className="h-3 w-3 text-primary-600 ml-1 inline" />
+  }
 
   // manualOverrides are sent from "Save Manual Classification" button and take priority over ai_suggested
   async function handleAction(itemId, status, notes = null, aiSuggestions = null, manualOverrides = null) {
@@ -824,7 +869,7 @@ export default function ReviewQueuePage() {
     if (allSelected) {
       setSelectedIds(new Set())
     } else {
-      setSelectedIds(new Set(items.map((i) => i.queue_item_id)))
+      setSelectedIds(new Set(displayItems.map((i) => i.queue_item_id)))
     }
   }
 
@@ -947,6 +992,33 @@ export default function ReviewQueuePage() {
               <span className="ml-auto text-sm text-secondary-500">{total.toLocaleString()} items</span>
             )}
           </div>
+
+          {/* Search bar */}
+          <div className="flex items-center gap-3 mt-3 pt-3 border-t border-secondary-100">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-secondary-400" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search companies…"
+                className="w-full pl-9 pr-8 py-2 text-sm border border-secondary-200 rounded-md bg-white text-secondary-900 placeholder-secondary-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              />
+              {search && (
+                <button
+                  onClick={() => setSearch('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-secondary-400 hover:text-secondary-600"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            <span className="text-sm text-secondary-500 shrink-0">
+              {search
+                ? `Showing ${displayItems.length} of ${items.length} items`
+                : `${items.length.toLocaleString()} items`}
+            </span>
+          </div>
         </CardContent>
       </Card>
 
@@ -964,17 +1036,37 @@ export default function ReviewQueuePage() {
                     className="h-4 w-4 rounded border-secondary-300 text-primary-600 focus:ring-primary-500"
                   />
                 </th>
-                <th className="text-left py-3 px-3 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                  Priority
+                <th className="py-3 px-3">
+                  <button
+                    onClick={() => toggleSort('priority')}
+                    className="flex items-center gap-0.5 font-semibold text-secondary-600 text-xs uppercase tracking-wide hover:text-secondary-900 transition-colors"
+                  >
+                    Priority <SortIcon col="priority" />
+                  </button>
                 </th>
-                <th className="text-left py-3 px-3 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                  Company
+                <th className="py-3 px-3">
+                  <button
+                    onClick={() => toggleSort('company')}
+                    className="flex items-center gap-0.5 font-semibold text-secondary-600 text-xs uppercase tracking-wide hover:text-secondary-900 transition-colors"
+                  >
+                    Company <SortIcon col="company" />
+                  </button>
                 </th>
-                <th className="text-left py-3 px-3 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                  Reason
+                <th className="py-3 px-3">
+                  <button
+                    onClick={() => toggleSort('reason')}
+                    className="flex items-center gap-0.5 font-semibold text-secondary-600 text-xs uppercase tracking-wide hover:text-secondary-900 transition-colors"
+                  >
+                    Reason <SortIcon col="reason" />
+                  </button>
                 </th>
-                <th className="text-left py-3 px-3 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
-                  Status
+                <th className="py-3 px-3">
+                  <button
+                    onClick={() => toggleSort('status')}
+                    className="flex items-center gap-0.5 font-semibold text-secondary-600 text-xs uppercase tracking-wide hover:text-secondary-900 transition-colors"
+                  >
+                    Status <SortIcon col="status" />
+                  </button>
                 </th>
                 <th className="text-left py-3 px-3 font-semibold text-secondary-600 text-xs uppercase tracking-wide">
                   Created
@@ -1011,7 +1103,7 @@ export default function ReviewQueuePage() {
                     </td>
                   </tr>
                 ))
-              ) : items.length === 0 ? (
+              ) : displayItems.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-16 text-center">
                     <ClipboardList className="h-10 w-10 text-secondary-200 mx-auto mb-3" />
@@ -1027,7 +1119,7 @@ export default function ReviewQueuePage() {
                   </td>
                 </tr>
               ) : (
-                items.flatMap((item) => {
+                displayItems.flatMap((item) => {
                   const isSelected = selectedIds.has(item.queue_item_id)
                   const isProcessing = actionLoading === item.queue_item_id
                   const isExpanded = expandedId === item.queue_item_id

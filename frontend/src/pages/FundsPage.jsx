@@ -132,38 +132,46 @@ const TYPE_FILTER_PILLS = [
 // Donut chart
 // ---------------------------------------------------------------------------
 
-const DONUT_ROUNDING_LABEL = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
-  if (percent < 0.04) return null
+const renderDonutLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
+  if (percent < 0.01) return null
   const RADIAN = Math.PI / 180
-  const radius = innerRadius + (outerRadius - innerRadius) * 0.55
+  const radius = outerRadius + 28
   const x = cx + radius * Math.cos(-midAngle * RADIAN)
   const y = cy + radius * Math.sin(-midAngle * RADIAN)
   return (
-    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={11} fontWeight={600}>
-      {`${(percent * 100).toFixed(0)}%`}
+    <text
+      x={x}
+      y={y}
+      fill="#1e3a5f"
+      textAnchor={x > cx ? 'start' : 'end'}
+      dominantBaseline="central"
+      fontSize={11}
+      fontWeight="500"
+    >
+      {`${fundTypeMeta(name).label} ${(percent * 100).toFixed(0)}%`}
     </text>
   )
 }
 
 function AllocationDonut({ byType, loading }) {
   if (loading) {
-    return <div className="h-64 flex items-center justify-center"><div className="h-40 w-40 rounded-full bg-secondary-100 animate-pulse" /></div>
+    return <div className="h-80 flex items-center justify-center"><div className="h-52 w-52 rounded-full bg-secondary-100 animate-pulse" /></div>
   }
   if (!byType?.length) return null
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <PieChart>
+    <ResponsiveContainer width="100%" height={500}>
+      <PieChart margin={{ top: 60, right: 120, bottom: 60, left: 120 }}>
         <Pie
           data={byType}
           dataKey="total_exposure_usd"
           nameKey="fund_type"
           cx="50%"
           cy="50%"
-          innerRadius={60}
-          outerRadius={100}
-          labelLine={false}
-          label={DONUT_ROUNDING_LABEL}
+          innerRadius={80}
+          outerRadius={150}
+          labelLine={{ stroke: '#94a3b8', strokeWidth: 1 }}
+          label={renderDonutLabel}
         >
           {byType.map((entry) => (
             <Cell key={entry.fund_type} fill={fundTypeMeta(entry.fund_type).color} />
@@ -318,27 +326,6 @@ function FundCardSkeleton() {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Legend
-// ---------------------------------------------------------------------------
-
-function TypeLegend({ byType }) {
-  if (!byType?.length) return null
-  return (
-    <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-4">
-      {byType.map((t) => {
-        const meta = fundTypeMeta(t.fund_type)
-        return (
-          <div key={t.fund_type} className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: meta.color }} />
-            <span className="text-xs text-secondary-600">{meta.label}</span>
-            <span className="text-xs text-secondary-400">{t.pct_of_portfolio?.toFixed(1)}%</span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Main page
@@ -399,7 +386,6 @@ export default function FundsPage() {
           </CardHeader>
           <CardContent>
             <AllocationDonut byType={byType} loading={isLoading} />
-            <TypeLegend byType={byType} />
           </CardContent>
         </Card>
 

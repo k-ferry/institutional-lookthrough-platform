@@ -105,8 +105,46 @@ function fundTypeBadgeClasses(type) {
   return 'bg-gray-200 text-gray-600'
 }
 
-// Fund table group order
+// Fund table group order (source cards at top of page)
 const SOURCE_GROUP_ORDER = ['pdf_document', '13f_filing', 'bdc_filing', 'synthetic']
+
+// Fund lineup grouping by asset class
+const FUND_TYPE_GROUPS = [
+  {
+    key: 'private_equity',
+    label: 'Private Equity',
+    match: (t) => ['pe', 'private_equity', 'private equity'].includes(t?.toLowerCase()),
+  },
+  {
+    key: 'venture_capital',
+    label: 'Venture Capital',
+    match: (t) => ['vc', 'venture_capital', 'venture capital'].includes(t?.toLowerCase()),
+  },
+  {
+    key: 'private_credit',
+    label: 'Private Credit',
+    match: (t) => ['credit', 'private_credit', 'private credit'].includes(t?.toLowerCase()),
+  },
+  {
+    key: 'hedge_fund',
+    label: 'Hedge Funds',
+    match: (t) => ['hedge', 'hedge_fund', 'hedge fund'].includes(t?.toLowerCase()),
+  },
+  {
+    key: 'public_market',
+    label: 'Public Market',
+    match: (t) => ['etf', 'mutual_fund', 'public', '13f'].includes(t?.toLowerCase()),
+  },
+  { key: 'bdc', label: 'BDC', match: (t) => t?.toLowerCase() === 'bdc' },
+  { key: 'other', label: 'Other', match: () => true },
+]
+
+function getFundTypeGroupKey(fund_type) {
+  for (const g of FUND_TYPE_GROUPS) {
+    if (g.match(fund_type)) return g.key
+  }
+  return 'other'
+}
 
 // Trend chart palette
 const TREND_COLORS = [
@@ -331,12 +369,17 @@ function FundLineupTable({ funds, loading }) {
     )
   }
 
-  // Group by source, preserving order
+  // Group by asset class (fund_type), preserving FUND_TYPE_GROUPS order
   const grouped = {}
-  SOURCE_GROUP_ORDER.forEach((s) => { grouped[s] = [] })
-  funds.forEach((f) => {
-    const key = SOURCE_GROUP_ORDER.includes(f.source) ? f.source : 'synthetic'
-    grouped[key].push(f)
+  FUND_TYPE_GROUPS.forEach((g) => { grouped[g.key] = [] })
+  funds.forEach((f) => { grouped[getFundTypeGroupKey(f.fund_type)].push(f) })
+
+  // Group-level exposure totals
+  const groupTotals = {}
+  FUND_TYPE_GROUPS.forEach((g) => {
+    groupTotals[g.key] = grouped[g.key].reduce(
+      (sum, f) => sum + (f.total_exposure_usd ?? 0), 0,
+    )
   })
 
   return (
@@ -353,36 +396,35 @@ function FundLineupTable({ funds, loading }) {
           </tr>
         </thead>
         <tbody>
-          {SOURCE_GROUP_ORDER.flatMap((source) => {
-            const group = grouped[source]
-            if (!group?.length) return []
-            const meta = SOURCE_META[source]
-            const groupLabel = meta?.groupLabel ?? source
+          {FUND_TYPE_GROUPS.flatMap((group) => {
+            const groupFunds = grouped[group.key]
+            if (!groupFunds?.length) return []
+            const groupExposure = groupTotals[group.key]
 
             return [
               // Group header row
-              <tr key={`hdr-${source}`}>
+              <tr key={`hdr-${group.key}`}>
                 <td
                   colSpan={6}
-                  className={`py-2 px-4 border-y border-secondary-100 ${meta?.headerBg ?? 'bg-secondary-50'}`}
+                  className="py-2 px-4 border-y border-secondary-100 bg-secondary-50"
                 >
-                  <div className="flex items-center gap-2.5">
-                    <span
-                      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${meta?.badgeClasses ?? ''}`}
-                    >
-                      {meta?.label ?? source}
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-semibold text-secondary-700 uppercase tracking-wide">
+                      {group.label}
                     </span>
-                    <span className="text-xs font-semibold text-secondary-600 uppercase tracking-wide">
-                      {groupLabel}
-                    </span>
+                    {groupExposure > 0 && (
+                      <span className="text-xs font-medium text-secondary-500">
+                        {formatAUM(groupExposure)}
+                      </span>
+                    )}
                     <span className="text-xs text-secondary-400">
-                      {group.length} fund{group.length !== 1 ? 's' : ''}
+                      · {groupFunds.length} fund{groupFunds.length !== 1 ? 's' : ''}
                     </span>
                   </div>
                 </td>
               </tr>,
               // Fund rows
-              ...group.map((f) => (
+              ...groupFunds.map((f) => (
                 <tr
                   key={f.fund_id}
                   className="border-b border-secondary-100 hover:bg-secondary-50 transition-colors"
@@ -470,6 +512,7 @@ function IndustryBreakdownChart({ data, loading }) {
 
   const chartData = items
     .filter((d) => d.industry && d.industry !== 'Unclassified' && d.industry !== 'Unknown')
+    .slice(0, 15)
     .map((d) => ({
       name: d.industry.length > 26 ? d.industry.slice(0, 26) + '…' : d.industry,
       value: d.value_usd,
@@ -480,7 +523,7 @@ function IndustryBreakdownChart({ data, loading }) {
 
   return (
     <>
-      <ResponsiveContainer width="100%" height={chartData.length * 34 + 32}>
+      <ResponsiveContainer width="100%" height={400}>
         <BarChart
           data={chartData}
           layout="vertical"

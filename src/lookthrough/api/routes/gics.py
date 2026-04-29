@@ -82,7 +82,8 @@ def get_gics_sectors(
         .all()
     )
 
-    total = sum(r.holding_count for r in rows) or 1
+    TOTAL_PORTFOLIO = 713_300_000
+    total_holdings = sum(r.holding_count for r in rows)
 
     return {
         "sectors": [
@@ -91,11 +92,11 @@ def get_gics_sectors(
                 "holding_count": row.holding_count,
                 "company_count": row.company_count,
                 "total_value": float(row.total_value) if row.total_value is not None else None,
-                "percentage": round(row.holding_count / total * 100, 2),
+                "percentage": round(float(row.total_value) / TOTAL_PORTFOLIO * 100, 2) if row.total_value else 0.0,
             }
             for row in rows
         ],
-        "total_holdings": total,
+        "total_holdings": total_holdings,
     }
 
 

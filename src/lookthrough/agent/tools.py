@@ -284,14 +284,11 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
         - unclassified_pct: % of total that is unclassified
         - coverage_pct: % of total that is classified
         - fund_name_filter: The fund filter applied (if any)
-        - sectors: Top 10 sectors plus "Other" bucket, each with pct_of_classified and pct_of_total
+        - sectors: Top 10 sectors plus "Other" bucket, each with pct_of_total (% of $713.3M portfolio)
     """
     root = _repo_root()
     gold = root / "data" / "gold"
     silver = root / "data" / "silver"
-
-    taxonomy = _read_table(silver / "dim_taxonomy_node.csv")
-    taxonomy_lookup = _build_taxonomy_lookup(taxonomy)
 
     # If fund_name filter provided, use GICS mapping on reported holdings
     if fund_name:
@@ -320,21 +317,20 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
         other_exposure = classified.iloc[10:]["total_exposure_value_usd"].sum()
 
         sectors = []
+        _TOTAL_PORTFOLIO_USD = 713_300_000.0
         for _, row in top_10.iterrows():
             exp = float(row["total_exposure_value_usd"])
             sectors.append({
                 "sector_name": str(row["gics_sector_name"]),
                 "total_exposure_value_usd": exp,
-                "pct_of_classified": float(exp / classified_exposure * 100) if classified_exposure > 0 else 0.0,
-                "pct_of_total": float(exp / total_exposure * 100) if total_exposure > 0 else 0.0,
+                "pct_of_total": round(exp / _TOTAL_PORTFOLIO_USD * 100, 1),
                 "avg_confidence": float(row["avg_confidence"]),
             })
         if other_exposure > 0:
             sectors.append({
                 "sector_name": "Other",
                 "total_exposure_value_usd": float(other_exposure),
-                "pct_of_classified": float(other_exposure / classified_exposure * 100) if classified_exposure > 0 else 0.0,
-                "pct_of_total": float(other_exposure / total_exposure * 100) if total_exposure > 0 else 0.0,
+                "pct_of_total": round(float(other_exposure) / _TOTAL_PORTFOLIO_USD * 100, 1),
                 "avg_confidence": None,
             })
 
@@ -352,7 +348,6 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
 
     # No fund filter — use fact_lp_scaled_exposure with per-fund latest date
     lp_scaled = _read_table(gold / "fact_lp_scaled_exposure.csv")
-    classifications = _read_table(gold / "fact_exposure_classification.csv")
 
     if lp_scaled.empty:
         return {"error": "No exposure data available", "sectors": []}
@@ -381,21 +376,22 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
     if nb_filtered.empty:
         return {"error": f"No exposure data for date {as_of_date}", "sectors": []}
 
-    # Build sector name lookup per company_id from classifications
+    # Build sector name lookup from dim_company.primary_sector (same source as dashboard)
+    # with normalization matching dashboard CASE logic
+    _SECTOR_NORM = {
+        "Technology": "Information Technology",
+        "Info. Tech.": "Information Technology",
+        "Healthcare": "Health Care",
+        "Cons. Discr.": "Consumer Discretionary",
+    }
+    dim_company = _read_table(silver / "dim_company.csv")
     sector_by_company: dict = {}
-    if not classifications.empty:
-        sector_class = classifications[classifications["taxonomy_type"] == "sector"][
-            ["company_id", "taxonomy_node_id"]
-        ].copy()
-        sector_class["company_id"] = sector_class["company_id"].astype(str)
-        for _, row in sector_class.iterrows():
-            node_id = str(row["taxonomy_node_id"])
-            if node_id == UNKNOWN_TAXONOMY_NODE_ID:
-                continue
-            node_info = taxonomy_lookup["node_by_id"].get(node_id, {})
-            name = node_info.get("node_name", "")
-            if name:
-                sector_by_company[str(row["company_id"])] = name
+    if not dim_company.empty:
+        dim_company["company_id"] = dim_company["company_id"].astype(str)
+        for _, row in dim_company.iterrows():
+            raw = row.get("primary_sector", "")
+            if pd.notna(raw) and raw:
+                sector_by_company[str(row["company_id"])] = _SECTOR_NORM.get(raw, raw)
 
     # Map each scaled exposure row to its sector name
     nb_filtered = nb_filtered.copy()
@@ -423,21 +419,20 @@ def get_sector_exposure(as_of_date: Optional[str] = None, fund_name: Optional[st
     top_10 = classified.head(10)
     other_exposure = classified.iloc[10:]["total_exposure_value_usd"].sum()
 
+    _TOTAL_PORTFOLIO_USD = 713_300_000.0
     sectors = []
     for _, row in top_10.iterrows():
         exp = float(row["total_exposure_value_usd"])
         sectors.append({
             "sector_name": str(row["sector_name"]),
             "total_exposure_value_usd": exp,
-            "pct_of_classified": float(exp / classified_exposure * 100) if classified_exposure > 0 else 0.0,
-            "pct_of_total": float(exp / total_exposure * 100) if total_exposure > 0 else 0.0,
+            "pct_of_total": round(exp / _TOTAL_PORTFOLIO_USD * 100, 1),
         })
     if other_exposure > 0:
         sectors.append({
             "sector_name": "Other",
             "total_exposure_value_usd": float(other_exposure),
-            "pct_of_classified": float(other_exposure / classified_exposure * 100) if classified_exposure > 0 else 0.0,
-            "pct_of_total": float(other_exposure / total_exposure * 100) if total_exposure > 0 else 0.0,
+            "pct_of_total": round(float(other_exposure) / _TOTAL_PORTFOLIO_USD * 100, 1),
         })
 
     return {

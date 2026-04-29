@@ -423,7 +423,7 @@ def get_industry_breakdown(
             func.coalesce(DimCompany.primary_sector, "Unclassified"),
         )
         .order_by(func.sum(FactLpScaledExposure.scaled_value_usd).desc())
-        .limit(10)
+        .limit(20)
         .all()
     )
 
@@ -613,8 +613,9 @@ def _build_portfolio_trend_response(
 ) -> dict:
     """Portfolio-level trend using Northbridge's scaled exposure from fact_lp_scaled_exposure.
 
-    Uses ALL available quarters (not just per-fund latest) so the chart has
-    multiple data points when the pipeline has been run for multiple periods.
+    Historical quarters use exact as_of_date matching. The latest data point uses the
+    per-fund latest date pattern so all 12 funds contribute regardless of report timing,
+    preventing the most recent quarter from appearing artificially small.
     """
     # All distinct as_of_dates across all funds, most-recent first
     date_rows = (
@@ -630,6 +631,9 @@ def _build_portfolio_trend_response(
     if not date_list:
         return {"dates": [], "series": []}
 
+    historical_dates = date_list[:-1]
+    CURRENT_KEY = "__current__"
+
     if dimension_type == "geography":
         dim_col = _normalize_country(
             func.coalesce(
@@ -641,37 +645,63 @@ def _build_portfolio_trend_response(
     else:  # sector (default)
         dim_col = func.coalesce(DimCompany.primary_sector, "Unclassified")
 
-    # Sum all funds' contributions for each quarter — no latest-date filter
-    rows = (
+    date_totals: dict[str, float] = {}
+    name_date_value: dict[str, dict[str, float]] = {}
+
+    def _accum(key: str, name: str, value) -> None:
+        v = float(value) if value else 0.0
+        date_totals[key] = date_totals.get(key, 0.0) + v
+        if name not in name_date_value:
+            name_date_value[name] = {}
+        name_date_value[name][key] = name_date_value[name].get(key, 0.0) + v
+
+    # Historical quarters: exact date match
+    if historical_dates:
+        hist_rows = (
+            db.query(
+                FactLpScaledExposure.as_of_date,
+                dim_col.label("dim_name"),
+                func.sum(FactLpScaledExposure.scaled_value_usd).label("value"),
+            )
+            .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
+            .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
+            .filter(
+                FactLpScaledExposure.lp_name == LP_NAME,
+                FactLpScaledExposure.as_of_date.in_(historical_dates),
+            )
+            .group_by(FactLpScaledExposure.as_of_date, dim_col)
+            .all()
+        )
+        for row in hist_rows:
+            _accum(row.as_of_date, row.dim_name, row.value)
+
+    # Latest point: per-fund latest date so all funds contribute
+    latest_sq = _latest_per_fund_sq(db)
+    curr_rows = (
         db.query(
-            FactLpScaledExposure.as_of_date,
             dim_col.label("dim_name"),
             func.sum(FactLpScaledExposure.scaled_value_usd).label("value"),
         )
         .join(FactReportedHolding, FactLpScaledExposure.reported_holding_id == FactReportedHolding.reported_holding_id)
         .outerjoin(DimCompany, FactReportedHolding.company_id == DimCompany.company_id)
-        .filter(
-            FactLpScaledExposure.lp_name == LP_NAME,
-            FactLpScaledExposure.as_of_date.in_(date_list),
+        .join(
+            latest_sq,
+            (FactLpScaledExposure.fund_id == latest_sq.c.fund_id)
+            & (FactLpScaledExposure.as_of_date == latest_sq.c.max_date),
         )
-        .group_by(FactLpScaledExposure.as_of_date, dim_col)
-        .order_by(FactLpScaledExposure.as_of_date)
+        .filter(FactLpScaledExposure.lp_name == LP_NAME)
+        .group_by(dim_col)
         .all()
     )
+    for row in curr_rows:
+        _accum(CURRENT_KEY, row.dim_name, row.value)
 
-    date_totals: dict[str, float] = {}
-    name_date_value: dict[str, dict[str, float]] = {}
-    for as_of_date, name, value in rows:
-        v = float(value) if value else 0.0
-        date_totals[as_of_date] = date_totals.get(as_of_date, 0.0) + v
-        if name not in name_date_value:
-            name_date_value[name] = {}
-        name_date_value[name][as_of_date] = v
+    chart_keys = historical_dates + [CURRENT_KEY]
 
     name_avg: dict[str, float] = {}
     for name, date_vals in name_date_value.items():
         pcts = []
-        for d in date_list:
+        for d in chart_keys:
             total = date_totals.get(d, 1.0) or 1.0
             pcts.append(date_vals.get(d, 0.0) / total * 100)
         name_avg[name] = sum(pcts) / len(pcts) if pcts else 0.0
@@ -683,7 +713,7 @@ def _build_portfolio_trend_response(
     series: list[dict] = []
     for name in top6:
         data = []
-        for d in date_list:
+        for d in chart_keys:
             total = date_totals.get(d, 1.0) or 1.0
             pct = name_date_value.get(name, {}).get(d, 0.0) / total * 100
             data.append(round(pct, 2))
@@ -691,14 +721,14 @@ def _build_portfolio_trend_response(
 
     if others:
         other_data = []
-        for d in date_list:
+        for d in chart_keys:
             total = date_totals.get(d, 1.0) or 1.0
             other_val = sum(name_date_value.get(n, {}).get(d, 0.0) for n in others)
             other_data.append(round(other_val / total * 100, 2))
         series.append({"name": "Other", "data": other_data})
 
-    quarters = [_date_to_quarter(d) for d in date_list]
-    return {"dates": quarters, "series": series}
+    quarter_labels = [_date_to_quarter(d) for d in historical_dates] + ["Current"]
+    return {"dates": quarter_labels, "series": series}
 
 
 @router.get("/exposure-trend")
