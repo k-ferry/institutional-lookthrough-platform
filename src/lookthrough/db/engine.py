@@ -22,9 +22,10 @@ _SessionLocal: sessionmaker[Session] | None = None
 
 
 def get_engine() -> Engine:
-    """Get or create the SQLAlchemy engine from DATABASE_URL environment variable.
+    """Get or create the SQLAlchemy engine.
 
-    Uses DATABASE_URL env var, defaulting to local PostgreSQL if not set.
+    Checks DATABASE_PRIVATE_URL (Railway internal network) then DATABASE_URL,
+    falling back to the local default. Adds SSL in production.
 
     Returns:
         SQLAlchemy Engine instance
@@ -32,8 +33,17 @@ def get_engine() -> Engine:
     global _engine
 
     if _engine is None:
-        database_url = os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
-        _engine = create_engine(database_url, echo=False)
+        database_url = (
+            os.environ.get("DATABASE_PRIVATE_URL")
+            or os.environ.get("DATABASE_URL")
+            or DEFAULT_DATABASE_URL
+        )
+
+        connect_args = {}
+        if os.environ.get("ENVIRONMENT") == "production":
+            connect_args["sslmode"] = "require"
+
+        _engine = create_engine(database_url, echo=False, connect_args=connect_args)
 
     return _engine
 
