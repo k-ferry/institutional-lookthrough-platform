@@ -1,7 +1,9 @@
 import axios from 'axios'
 
+const API_URL = import.meta.env.VITE_API_URL || ''
+
 const apiClient = axios.create({
-  baseURL: '/api',
+  baseURL: `${API_URL}/api`,
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
@@ -19,7 +21,7 @@ apiClient.interceptors.response.use(
 )
 
 export const authClient = axios.create({
-  baseURL: '/auth',
+  baseURL: `${API_URL}/auth`,
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',

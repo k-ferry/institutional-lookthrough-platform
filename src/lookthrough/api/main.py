@@ -45,10 +45,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware - configured for Vite dev server
+# CORS middleware — allow dev server and any production frontend URL from env
+_cors_origins = ["http://localhost:5173", "http://localhost:3000"]
+_frontend_url = os.environ.get("FRONTEND_URL")
+if _frontend_url:
+    _cors_origins.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -120,6 +125,11 @@ class HealthResponse(BaseModel):
 # ----------------------------------------------------------------------------
 # Health Endpoint
 # ----------------------------------------------------------------------------
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "lookthrough-api"}
+
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health() -> dict:
